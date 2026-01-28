@@ -611,6 +611,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			m.MarkResult(execCtx, result)
 			lastErr = errExec
+			if !shouldRotateAuthOnError(errExec) {
+				return cliproxyexecutor.Response{}, errExec
+			}
 			continue
 		}
 		m.MarkResult(execCtx, result)
@@ -664,6 +667,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			m.MarkResult(execCtx, result)
 			lastErr = errExec
+			if !shouldRotateAuthOnError(errExec) {
+				return cliproxyexecutor.Response{}, errExec
+			}
 			continue
 		}
 		m.MarkResult(execCtx, result)
@@ -715,6 +721,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(execCtx, result)
 			lastErr = errStream
+			if !shouldRotateAuthOnError(errStream) {
+				return nil, errStream
+			}
 			continue
 		}
 		out := make(chan cliproxyexecutor.StreamChunk)
@@ -1087,6 +1096,9 @@ func (m *Manager) shouldRetryAfterError(err error, attempt, maxAttempts int, pro
 	if status := statusCodeFromError(err); status == http.StatusOK {
 		return 0, false
 	}
+	if !shouldRotateAuthOnError(err) {
+		return 0, false
+	}
 	wait, found := m.closestCooldownWait(providers, model)
 	if !found || wait > maxWait {
 		return 0, false
@@ -1379,6 +1391,29 @@ func statusCodeFromError(err error) int {
 		return sc.StatusCode()
 	}
 	return 0
+}
+
+func shouldRotateAuthOnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if status == 0 {
+		return true
+	}
+	if status >= 400 && status < 500 {
+		switch status {
+		case http.StatusUnauthorized,
+			http.StatusForbidden,
+			http.StatusNotFound,
+			http.StatusRequestTimeout,
+			http.StatusTooManyRequests:
+			return true
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func retryAfterFromError(err error) *time.Duration {
