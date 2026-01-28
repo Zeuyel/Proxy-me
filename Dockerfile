@@ -1,3 +1,15 @@
+FROM node:22-alpine AS web-builder
+
+WORKDIR /web
+
+COPY web/package.json web/package-lock.json ./
+
+RUN npm ci
+
+COPY web/ ./
+
+RUN npm run build
+
 FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
@@ -21,6 +33,8 @@ RUN apk add --no-cache tzdata
 RUN mkdir /CLIProxyAPI
 
 COPY --from=builder ./app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
+
+COPY --from=web-builder /web/dist /CLIProxyAPI/web/dist
 
 COPY config.example.yaml /CLIProxyAPI/config.example.yaml
 

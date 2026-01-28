@@ -1,0 +1,111 @@
+/**
+ * 全局样式
+ */
+
+@use './variables.scss' as *;
+@use './mixins.scss' as *;
+@use './reset.scss';
+@use './themes.scss';
+@use './components.scss';
+@use './layout.scss';
+
+body {
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  transition: background-color $transition-normal, color $transition-normal;
+}
+
+html.modal-open,
+body.modal-open {
+  overflow: hidden;
+}
+
+body.modal-open .content {
+  overflow: hidden;
+}
+
+// 滚动条样式
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: $radius-full;
+
+  &:hover {
+    background: var(--border-hover);
+  }
+}
+
+// 通用工具类
+.container {
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 $spacing-md;
+}
+
+.flex-center {
+  @include flex-center;
+}
+
+.text-ellipsis {
+  @include text-ellipsis;
+}
+
+// 通用过渡
+.fade-enter {
+  opacity: 0;
+}
+
+.fade-enter-active {
+  opacity: 1;
+  transition: opacity $transition-normal;
+}
+
+.fade-exit {
+  opacity: 1;
+}
+
+.fade-exit-active {
+  opacity: 0;
+  transition: opacity $transition-normal;
+}
+
+// 图表相关样式
+.fill-foreground {
+  fill: var(--foreground);
+}
+
+.stroke-black {
+  stroke: #000000;
+}
+
+.dark .stroke-white {
+  stroke: #ffffff;
+}
+
+// Recharts 图表样式
+.recharts-layer path {
+  stroke: var(--border-color);
+}
+
+// Tailwind 工具类支持
+.mx-auto {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.aspect-square {
+  aspect-ratio: 1 / 1;
+}
+
+.max-h-\[250px\] {
+  max-height: 250px;
+}

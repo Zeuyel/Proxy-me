@@ -1,0 +1,121 @@
+/**
+ * 主题样式
+ */
+
+// 浅色主题（默认）
+// 浅色主题（默认）
+:root {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f4f4f0; // Slightly off-white/beige can look good, or keep white
+  --bg-tertiary: #e0e0e0;
+
+  --text-primary: #000000;
+  --text-secondary: #333333;
+  --text-tertiary: #555555;
+
+  --border-color: #000000;
+  --border-hover: #000000;
+
+  --primary-color: #3b82f6; // Keep or make more potent e.g. #0055ff
+  --primary-hover: #2563eb;
+  --primary-active: #1d4ed8;
+
+  --success-color: #00a870; // High contrast green
+  --warning-color: #ffaa00;
+  --error-color: #ff3333;
+  --info-color: #3b82f6;
+
+  --success-badge-bg: #ccfce3;
+  --success-badge-text: #000000;
+  --success-badge-border: #00a870;
+
+  --failure-badge-bg: #ffd1d1;
+  --failure-badge-text: #000000;
+  --failure-badge-border: #ff3333;
+
+  --count-badge-bg: #dbeafe;
+  --count-badge-text: #000000;
+
+  --brutal-border: 2px solid #000000;
+  --brutal-shadow: 4px 4px 0px 0px #000000;
+  --brutal-shadow-sm: 2px 2px 0px 0px #000000;
+  --brutal-shadow-hover: 6px 6px 0px 0px #000000;
+  --brutal-shadow-active: 0px 0px 0px 0px #000000; // Pressed effect
+
+  // Neo-Brutalist Vivid Colors for Charts
+  --chart-1: #FF6B6B;
+  --chart-2: #4ECDC4;
+  --chart-3: #FFEEAD; // May need darker stroke
+  --chart-4: #96CEB4;
+  --chart-5: #FF9F1C;
+  --chart-active-dot: #000000;
+
+  // Tooltip 和前景色
+  --tooltip-bg: #ffffff;
+  --tooltip-border: #e5e7eb;
+  --tooltip-title: #111827;
+  --tooltip-label: #6b7280;
+  --tooltip-value: #111827;
+  --foreground: #111827;
+
+  --shadow: var(--brutal-shadow);
+  --shadow-lg: var(--brutal-shadow-hover);
+}
+
+// 深色主题
+[data-theme='dark'] {
+  --bg-primary: #191919; // Dark gray instead of pure black sometimes better
+  --bg-secondary: #2a2a2a;
+  --bg-tertiary: #333333;
+
+  --text-primary: #ffffff;
+  --text-secondary: #cccccc;
+  --text-tertiary: #999999;
+
+  --border-color: #ffffff; // White borders for dark mode brutalism
+  --border-hover: #ffffff;
+
+  --primary-color: #60a5fa;
+  --primary-hover: #93c5fd;
+  --primary-active: #bfdbfe;
+
+  --success-color: #10b981;
+  --warning-color: #fbbf24;
+  --error-color: #f87171;
+  --info-color: #60a5fa;
+
+  --success-badge-bg: #064e3b;
+  --success-badge-text: #ffffff;
+  --success-badge-border: #34d399;
+
+  --failure-badge-bg: #7f1d1d;
+  --failure-badge-text: #ffffff;
+  --failure-badge-border: #f87171;
+
+  --count-badge-bg: #1e3a8a;
+  --count-badge-text: #ffffff;
+
+  --brutal-border: 2px solid #ffffff;
+  --brutal-shadow: 4px 4px 0px 0px #ffffff;
+  --brutal-shadow-sm: 2px 2px 0px 0px #ffffff;
+  --brutal-shadow-hover: 6px 6px 0px 0px #ffffff;
+  --brutal-shadow-active: 0px 0px 0px 0px #ffffff;
+
+  --chart-1: #FF6B6B;
+  --chart-2: #4ECDC4;
+  --chart-3: #FFEEAD;
+  --chart-4: #96CEB4;
+  --chart-5: #FF9F1C;
+  --chart-active-dot: #ffffff;
+
+  // Tooltip 和前景色（深色主题）
+  --tooltip-bg: #374151;
+  --tooltip-border: #4b5563;
+  --tooltip-title: #f3f4f6;
+  --tooltip-label: #d1d5db;
+  --tooltip-value: #f3f4f6;
+  --foreground: #f3f4f6;
+
+  --shadow: var(--brutal-shadow);
+  --shadow-lg: var(--brutal-shadow-hover);
+}

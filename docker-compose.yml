@@ -1,7 +1,6 @@
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
-    pull_policy: always
+    image: ${CLI_PROXY_IMAGE:-cli-proxy-api:local}
     build:
       context: .
       dockerfile: Dockerfile
@@ -14,6 +13,9 @@ services:
     #   - .env
     environment:
       DEPLOY: ${DEPLOY:-}
+      TZ: ${TZ:-Asia/Shanghai}
+      WRITABLE_PATH: /CLIProxyAPI
+      # MANAGEMENT_STATIC_PATH: /CLIProxyAPI/web/dist
     ports:
       - "8317:8317"
       - "8085:8085"
@@ -25,4 +27,5 @@ services:
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+      # - ${CLI_PROXY_WEB_PATH:-./web/dist}:/CLIProxyAPI/web/dist
     restart: unless-stopped

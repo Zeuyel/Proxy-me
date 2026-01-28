@@ -26,7 +26,7 @@ import (
 const (
 	defaultManagementReleaseURL  = "https://api.github.com/repos/router-for-me/Cli-Proxy-API-Management-Center/releases/latest"
 	defaultManagementFallbackURL = "https://cpamc.router-for.me/"
-	managementAssetName          = "management.html"
+	managementAssetName          = "index.html" // Changed from management.html to index.html for web/dist integration
 	httpUserAgent                = "CLIProxyAPI-management-updater"
 	updateCheckInterval          = 3 * time.Hour
 )
@@ -134,6 +134,7 @@ type releaseResponse struct {
 }
 
 // StaticDir resolves the directory that stores the management control panel asset.
+// Modified to use web/dist directory for integrated frontend.
 func StaticDir(configFilePath string) string {
 	if override := strings.TrimSpace(os.Getenv("MANAGEMENT_STATIC_PATH")); override != "" {
 		cleaned := filepath.Clean(override)
@@ -144,7 +145,7 @@ func StaticDir(configFilePath string) string {
 	}
 
 	if writable := util.WritablePath(); writable != "" {
-		return filepath.Join(writable, "static")
+		return filepath.Join(writable, "web", "dist")
 	}
 
 	configFilePath = strings.TrimSpace(configFilePath)
@@ -160,7 +161,7 @@ func StaticDir(configFilePath string) string {
 		}
 	}
 
-	return filepath.Join(base, "static")
+	return filepath.Join(base, "web", "dist")
 }
 
 // FilePath resolves the absolute path to the management control panel asset.
@@ -183,6 +184,7 @@ func FilePath(configFilePath string) string {
 // EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
 // The function is designed to run in a background goroutine and will never panic.
 // It enforces a 3-hour rate limit to avoid frequent checks on config/auth file changes.
+// MODIFIED: Disabled automatic download from GitHub, only use local static files.
 func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -200,84 +202,20 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 	}
 
 	localPath := filepath.Join(staticDir, managementAssetName)
-	localFileMissing := false
+
+	// Check if local file exists
 	if _, errStat := os.Stat(localPath); errStat != nil {
 		if errors.Is(errStat, os.ErrNotExist) {
-			localFileMissing = true
+			log.Warn("management asset not found at local path, please place management.html in static directory")
 		} else {
 			log.WithError(errStat).Debug("failed to stat local management asset")
 		}
-	}
-
-	// Rate limiting: check only once every 3 hours
-	lastUpdateCheckMu.Lock()
-	now := time.Now()
-	timeSinceLastCheck := now.Sub(lastUpdateCheckTime)
-	if timeSinceLastCheck < updateCheckInterval {
-		lastUpdateCheckMu.Unlock()
-		log.Debugf("management asset update check skipped: last check was %v ago (interval: %v)", timeSinceLastCheck.Round(time.Second), updateCheckInterval)
-		return
-	}
-	lastUpdateCheckTime = now
-	lastUpdateCheckMu.Unlock()
-
-	if errMkdirAll := os.MkdirAll(staticDir, 0o755); errMkdirAll != nil {
-		log.WithError(errMkdirAll).Warn("failed to prepare static directory for management asset")
 		return
 	}
 
-	releaseURL := resolveReleaseURL(panelRepository)
-	client := newHTTPClient(proxyURL)
-
-	localHash, err := fileSHA256(localPath)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			log.WithError(err).Debug("failed to read local management asset hash")
-		}
-		localHash = ""
-	}
-
-	asset, remoteHash, err := fetchLatestAsset(ctx, client, releaseURL)
-	if err != nil {
-		if localFileMissing {
-			log.WithError(err).Warn("failed to fetch latest management release information, trying fallback page")
-			if ensureFallbackManagementHTML(ctx, client, localPath) {
-				return
-			}
-			return
-		}
-		log.WithError(err).Warn("failed to fetch latest management release information")
-		return
-	}
-
-	if remoteHash != "" && localHash != "" && strings.EqualFold(remoteHash, localHash) {
-		log.Debug("management asset is already up to date")
-		return
-	}
-
-	data, downloadedHash, err := downloadAsset(ctx, client, asset.BrowserDownloadURL)
-	if err != nil {
-		if localFileMissing {
-			log.WithError(err).Warn("failed to download management asset, trying fallback page")
-			if ensureFallbackManagementHTML(ctx, client, localPath) {
-				return
-			}
-			return
-		}
-		log.WithError(err).Warn("failed to download management asset")
-		return
-	}
-
-	if remoteHash != "" && !strings.EqualFold(remoteHash, downloadedHash) {
-		log.Warnf("remote digest mismatch for management asset: expected %s got %s", remoteHash, downloadedHash)
-	}
-
-	if err = atomicWriteFile(localPath, data); err != nil {
-		log.WithError(err).Warn("failed to update management asset on disk")
-		return
-	}
-
-	log.Infof("management asset updated successfully (hash=%s)", downloadedHash)
+	// Local file exists, use it directly without downloading from GitHub
+	log.Debug("using local management asset, automatic download from GitHub is disabled")
+	return
 }
 
 func ensureFallbackManagementHTML(ctx context.Context, client *http.Client, localPath string) bool {

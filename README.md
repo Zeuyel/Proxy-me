@@ -60,6 +60,34 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+### Building from Source
+
+This project includes an integrated frontend in the `web/` directory.
+
+**Quick build (Windows):**
+```powershell
+.\build.ps1
+```
+
+**Quick build (Linux/macOS):**
+```bash
+./build.sh
+```
+
+**Manual build:**
+```bash
+# Build frontend
+cd web
+npm install
+npm run build
+cd ..
+
+# Build backend
+go build -o cli-proxy-api.exe ./cmd/server
+```
+
+The frontend will be built to `web/dist/index.html` and served at `/management.html` endpoint.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
