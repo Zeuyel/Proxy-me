@@ -444,6 +444,65 @@
   }
 }
 
+.activeSessions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sessionList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.sessionChip {
+  min-width: 160px;
+  padding: 10px 12px;
+  border: 2px solid var(--brutal-border);
+  border-radius: $radius-md;
+  background: var(--bg-primary);
+  box-shadow: var(--brutal-shadow-sm);
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: transform $transition-fast, box-shadow $transition-fast;
+
+  &:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--brutal-shadow);
+  }
+}
+
+.sessionChipActive {
+  background: var(--bg-tertiary);
+  border-color: var(--primary-color);
+}
+
+.sessionId {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.sessionMeta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.sessionEmpty {
+  padding: 18px;
+  border-radius: $radius-md;
+  border: 2px dashed var(--brutal-border);
+  background: var(--bg-secondary);
+  color: var(--text-tertiary);
+  font-size: 12px;
+  text-align: center;
+}
+
 .lineChartContainer {
   width: 100%;
   height: 260px;
@@ -605,8 +664,8 @@
 // 虚拟滚动表格固定列宽
 .virtualTable {
   table-layout: fixed;
-  min-width: 1180px;
-  width: max-content;
+  min-width: 1380px;
+  width: 100%;
 
   th, td {
     white-space: nowrap;
@@ -615,7 +674,8 @@
   th:nth-child(1), td:nth-child(1),
   th:nth-child(3), td:nth-child(3),
   th:nth-child(4), td:nth-child(4),
-  th:nth-child(12), td:nth-child(12) {
+  th:nth-child(5), td:nth-child(5),
+  th:nth-child(14), td:nth-child(14) {
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -626,26 +686,30 @@
   th:nth-child(2), td:nth-child(2) { width: 65px; }
   // 模型
   th:nth-child(3), td:nth-child(3) { width: 160px; }
-  // 请求渠道
+  // Session
   th:nth-child(4), td:nth-child(4) { width: 140px; }
+  // 请求渠道
+  th:nth-child(5), td:nth-child(5) { width: 140px; }
   // 状态
-  th:nth-child(5), td:nth-child(5) { width: 80px; }
+  th:nth-child(6), td:nth-child(6) { width: 80px; }
+  // 性能/状态
+  th:nth-child(7), td:nth-child(7) { width: 110px; }
   // 最近请求状态
-  th:nth-child(6), td:nth-child(6) { width: 110px; }
+  th:nth-child(8), td:nth-child(8) { width: 110px; }
   // 成功率
-  th:nth-child(7), td:nth-child(7) { width: 70px; }
+  th:nth-child(9), td:nth-child(9) { width: 70px; }
   // 请求数
-  th:nth-child(8), td:nth-child(8) { width: 70px; }
+  th:nth-child(10), td:nth-child(10) { width: 70px; }
   // 输入
-  th:nth-child(9), td:nth-child(9) { width: 60px; }
+  th:nth-child(11), td:nth-child(11) { width: 60px; }
   // 输出
-  th:nth-child(10), td:nth-child(10) { width: 60px; }
+  th:nth-child(12), td:nth-child(12) { width: 60px; }
   // 总 Token
-  th:nth-child(11), td:nth-child(11) { width: 70px; }
+  th:nth-child(13), td:nth-child(13) { width: 70px; }
   // 时间
-  th:nth-child(12), td:nth-child(12) { width: 150px; }
+  th:nth-child(14), td:nth-child(14) { width: 150px; }
   // 操作
-  th:nth-child(13), td:nth-child(13) { width: 90px; }
+  th:nth-child(15), td:nth-child(15) { width: 90px; }
 }
 
 .table {
@@ -774,6 +838,51 @@
     background: rgba(239, 68, 68, 0.15);
     color: var(--danger-color, #ef4444);
   }
+
+  &.pending {
+    background: rgba(148, 163, 184, 0.2);
+    color: var(--text-secondary);
+  }
+}
+
+.statusDetailBtn {
+  padding: 2px 8px;
+  border-radius: $radius-sm;
+  border: 1px solid var(--brutal-border);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 11px;
+  cursor: pointer;
+  box-shadow: var(--brutal-shadow-sm);
+  white-space: nowrap;
+
+  &:hover {
+    box-shadow: var(--brutal-shadow);
+  }
+}
+
+.statusDetailText {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.perfCell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.perfSeparator {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.perfDuration {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 // 成功率颜色
@@ -1000,6 +1109,31 @@
 .channelSecret {
   color: var(--text-tertiary);
   font-size: 0.9em;
+}
+
+.requestDetail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.detailRow {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.detailLabel {
+  min-width: 90px;
+  color: var(--text-tertiary);
+  font-weight: 600;
+}
+
+.detailValue {
+  color: var(--text-primary);
+  word-break: break-word;
 }
 
 // 已禁用模型行

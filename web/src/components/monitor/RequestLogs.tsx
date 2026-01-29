@@ -2,7 +2,9 @@ import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { Card } from '@/components/ui/Card';
+import { Modal } from '@/components/ui/Modal';
 import { usageApi } from '@/services/api';
+import type { MonitorRequestLogEntry } from '@/services/api';
 import { useDisableModel } from '@/hooks';
 import { TimeRangeSelector, formatTimeRangeCaption, type TimeRange } from './TimeRangeSelector';
 import { DisableModelModal } from './DisableModelModal';
@@ -24,6 +26,8 @@ interface RequestLogsProps {
   providerMap: Record<string, string>;
   providerTypeMap: Record<string, string>;
   apiFilter: string;
+  sessionFilter: string;
+  onSessionFilterChange: (value: string) => void;
 }
 
 interface LogEntry {
@@ -41,6 +45,12 @@ interface LogEntry {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  sessionId: string;
+  requestId: string;
+  statusCode: number;
+  durationMs: number;
+  errorMessage: string;
+  pending: boolean;
 }
 
 interface ChannelModelRequest {
@@ -58,7 +68,15 @@ interface PrecomputedStats {
 // 虚拟滚动行高
 const ROW_HEIGHT = 40;
 
-export function RequestLogs({ data, loading: parentLoading, providerMap, providerTypeMap, apiFilter }: RequestLogsProps) {
+export function RequestLogs({
+  data,
+  loading: parentLoading,
+  providerMap,
+  providerTypeMap,
+  apiFilter,
+  sessionFilter,
+  onSessionFilterChange,
+}: RequestLogsProps) {
   const { t } = useTranslation();
   const [filterApi, setFilterApi] = useState('');
   const [filterModel, setFilterModel] = useState('');
@@ -68,6 +86,7 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
   const [autoRefresh, setAutoRefresh] = useState(10);
   const [countdown, setCountdown] = useState(0);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [detailEntry, setDetailEntry] = useState<LogEntry | null>(null);
   // 用 ref 存储 fetchLogData，避免作为定时器 useEffect 的依赖
   const fetchLogDataRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
@@ -75,11 +94,24 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
   const tableContainerRef = useRef<HTMLDivElement>(null);
   // 固定表头容器 ref
   const headerRef = useRef<HTMLDivElement>(null);
+  const headerTableRef = useRef<HTMLTableElement>(null);
+  const bodyTableRef = useRef<HTMLTableElement>(null);
 
   // 同步表头和内容的水平滚动
   const handleScroll = useCallback(() => {
     if (tableContainerRef.current && headerRef.current) {
       headerRef.current.scrollLeft = tableContainerRef.current.scrollLeft;
+    }
+  }, []);
+
+  const syncHeaderWidth = useCallback(() => {
+    if (!headerTableRef.current || !bodyTableRef.current) {
+      return;
+    }
+    const width = bodyTableRef.current.offsetWidth;
+    if (width > 0) {
+      headerTableRef.current.style.width = `${width}px`;
+      headerTableRef.current.style.minWidth = `${width}px`;
     }
   }, []);
 
@@ -91,6 +123,8 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
   const [logData, setLogData] = useState<UsageData | null>(null);
   const [logLoading, setLogLoading] = useState(false);
   const [isFirstLoad, setIsFirstLoad] = useState(true);
+  const [liveLogs, setLiveLogs] = useState<MonitorRequestLogEntry[]>([]);
+  const [liveLoading, setLiveLoading] = useState(false);
 
   // 使用禁用模型 Hook
   const {
@@ -182,6 +216,15 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
 
         setLogData(filtered);
       }
+      setLiveLoading(true);
+      try {
+        const liveResponse = await usageApi.getMonitorRequestLogs(200);
+        setLiveLogs(liveResponse?.logs ?? []);
+      } catch (err) {
+        console.error('实时请求日志刷新失败：', err);
+      } finally {
+        setLiveLoading(false);
+      }
     } catch (err) {
       console.error('日志刷新失败：', err);
     } finally {
@@ -240,7 +283,7 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
 
   // 获取倒计时显示文本
   const getCountdownText = () => {
-    if (logLoading) {
+    if (logLoading || liveLoading) {
       return t('monitor.logs.refreshing');
     }
     if (autoRefresh === 0) {
@@ -252,45 +295,103 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
     return t('monitor.logs.refreshing');
   };
 
+  const liveMap = useMemo(() => {
+    const map = new Map<string, MonitorRequestLogEntry>();
+    liveLogs.forEach((entry) => {
+      if (entry.id) {
+        map.set(entry.id, entry);
+      }
+    });
+    return map;
+  }, [liveLogs]);
+
   // 将数据转换为日志条目
   const logEntries = useMemo(() => {
-    if (!effectiveData?.apis) return [];
-
     const entries: LogEntry[] = [];
     let idCounter = 0;
+    const usageRequestIDs = new Set<string>();
 
-    Object.entries(effectiveData.apis).forEach(([apiKey, apiData]) => {
-      Object.entries(apiData.models).forEach(([modelName, modelData]) => {
-        modelData.details.forEach((detail) => {
-          const source = detail.source || 'unknown';
-          const { provider, masked } = getProviderDisplayParts(source, providerMap);
-          const displayName = provider ? `${provider} (${masked})` : masked;
-          const timestampMs = detail.timestamp ? new Date(detail.timestamp).getTime() : 0;
-          // 获取提供商类型
-          const providerType = providerTypeMap[source] || '--';
-          entries.push({
-            id: `${idCounter++}`,
-            timestamp: detail.timestamp,
-            timestampMs,
-            apiKey,
-            model: modelName,
-            source,
-            displayName,
-            providerName: provider,
-            providerType,
-            maskedKey: masked,
-            failed: detail.failed,
-            inputTokens: detail.tokens.input_tokens || 0,
-            outputTokens: detail.tokens.output_tokens || 0,
-            totalTokens: detail.tokens.total_tokens || 0,
+    if (effectiveData?.apis) {
+      Object.entries(effectiveData.apis).forEach(([apiKey, apiData]) => {
+        Object.entries(apiData.models).forEach(([modelName, modelData]) => {
+          modelData.details.forEach((detail) => {
+            if (detail.request_id) {
+              usageRequestIDs.add(detail.request_id);
+            }
+            const source = detail.source || 'unknown';
+            const { provider, masked } = getProviderDisplayParts(source, providerMap);
+            const displayName = provider ? `${provider} (${masked})` : masked;
+            const timestampMs = detail.timestamp ? new Date(detail.timestamp).getTime() : 0;
+            // 获取提供商类型
+            const providerType = providerTypeMap[source] || '--';
+            const liveEntry = detail.request_id ? liveMap.get(detail.request_id) : undefined;
+            entries.push({
+              id: `${idCounter++}`,
+              timestamp: detail.timestamp,
+              timestampMs,
+              apiKey,
+              model: modelName,
+              source,
+              displayName,
+              providerName: provider,
+              providerType,
+              maskedKey: masked,
+              failed: detail.failed,
+              inputTokens: detail.tokens.input_tokens || 0,
+              outputTokens: detail.tokens.output_tokens || 0,
+              totalTokens: detail.tokens.total_tokens || 0,
+              sessionId: detail.session_id || '',
+              requestId: detail.request_id || '',
+              statusCode: liveEntry?.status_code || 0,
+              durationMs: liveEntry?.duration_ms || 0,
+              errorMessage: liveEntry?.error_message || '',
+              pending: liveEntry?.pending ?? false,
+            });
           });
         });
+      });
+    }
+
+    const hasUsageData = !!effectiveData?.apis;
+
+    liveLogs.forEach((entry) => {
+      if (!entry) return;
+      if (hasUsageData) {
+        if (!entry.pending) return;
+        if (entry.id && usageRequestIDs.has(entry.id)) return;
+      }
+      const timestampMs = entry.started_at ? new Date(entry.started_at).getTime() : 0;
+      const source = entry.api_key || 'unknown';
+      const { provider, masked } = getProviderDisplayParts(source, providerMap);
+      const displayName = provider ? `${provider} (${masked})` : masked;
+      const providerType = entry.request_type || providerTypeMap[source] || '--';
+      entries.push({
+        id: `pending-${entry.id}`,
+        timestamp: entry.started_at || '',
+        timestampMs,
+        apiKey: entry.api_key || '-',
+        model: entry.model || '-',
+        source,
+        displayName,
+        providerName: provider,
+        providerType,
+        maskedKey: masked,
+        failed: false,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        sessionId: entry.session_id || '',
+        requestId: entry.id || '',
+        statusCode: entry.status_code || 0,
+        durationMs: entry.duration_ms || 0,
+        errorMessage: entry.error_message || '',
+        pending: entry.pending ?? false,
       });
     });
 
     // 按时间倒序排序
     return entries.sort((a, b) => b.timestampMs - a.timestampMs);
-  }, [effectiveData, providerMap, providerTypeMap]);
+  }, [effectiveData, providerMap, providerTypeMap, liveLogs, liveMap]);
 
   // 预计算所有条目的统计数据（一次性计算，避免渲染时重复计算）
   const precomputedStats = useMemo(() => {
@@ -300,6 +401,9 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
     const channelModelGroups: Record<string, { entry: LogEntry; index: number }[]> = {};
 
     logEntries.forEach((entry, index) => {
+      if (entry.pending) {
+        return;
+      }
       const key = `${entry.source}|||${entry.model}`;
       if (!channelModelGroups[key]) {
         channelModelGroups[key] = [];
@@ -346,11 +450,12 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
   }, [logEntries]);
 
   // 获取筛选选项
-  const { apis, models, sources, providerTypes } = useMemo(() => {
+  const { apis, models, sources, providerTypes, sessions } = useMemo(() => {
     const apiSet = new Set<string>();
     const modelSet = new Set<string>();
     const sourceSet = new Set<string>();
     const providerTypeSet = new Set<string>();
+    const sessionSet = new Set<string>();
 
     logEntries.forEach((entry) => {
       apiSet.add(entry.apiKey);
@@ -359,6 +464,9 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
       if (entry.providerType && entry.providerType !== '--') {
         providerTypeSet.add(entry.providerType);
       }
+      if (entry.sessionId) {
+        sessionSet.add(entry.sessionId);
+      }
     });
 
     return {
@@ -366,6 +474,7 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
       models: Array.from(modelSet).sort(),
       sources: Array.from(sourceSet).sort(),
       providerTypes: Array.from(providerTypeSet).sort(),
+      sessions: Array.from(sessionSet).sort(),
     };
   }, [logEntries]);
 
@@ -377,10 +486,12 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
       if (filterSource && entry.source !== filterSource) return false;
       if (filterStatus === 'success' && entry.failed) return false;
       if (filterStatus === 'failed' && !entry.failed) return false;
+      if (filterStatus && entry.pending) return false;
       if (filterProviderType && entry.providerType !== filterProviderType) return false;
+      if (sessionFilter && entry.sessionId !== sessionFilter) return false;
       return true;
     });
-  }, [logEntries, filterApi, filterModel, filterSource, filterStatus, filterProviderType]);
+  }, [logEntries, filterApi, filterModel, filterSource, filterStatus, filterProviderType, sessionFilter]);
 
   // 虚拟滚动配置
   const rowVirtualizer = useVirtualizer({
@@ -389,6 +500,16 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
     estimateSize: () => ROW_HEIGHT,
     overscan: 10, // 预渲染上下各 10 行
   });
+
+  useEffect(() => {
+    syncHeaderWidth();
+    if (!bodyTableRef.current) {
+      return;
+    }
+    const observer = new ResizeObserver(() => syncHeaderWidth());
+    observer.observe(bodyTableRef.current);
+    return () => observer.disconnect();
+  }, [syncHeaderWidth, filteredEntries.length]);
 
   // 格式化数字
   const formatNumber = (num: number) => {
@@ -404,11 +525,48 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
     };
   };
 
+  const getPerformanceParts = (entry: LogEntry) => {
+    if (entry.pending) {
+      return { status: t('monitor.logs.pending'), duration: '' };
+    }
+    if (entry.statusCode > 0) {
+      return {
+        status: `${entry.statusCode}`,
+        duration: entry.durationMs > 0 ? `${entry.durationMs}ms` : '-'
+      };
+    }
+    if (entry.errorMessage) {
+      return { status: t('common.error'), duration: '' };
+    }
+    return { status: '-', duration: '' };
+  };
+
+  const handleDetailClick = (entry: LogEntry, event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setDetailEntry(entry);
+  };
+
+  const getFailureReason = (entry: LogEntry | null) => {
+    if (!entry || !entry.failed) {
+      return '-';
+    }
+    if (entry.errorMessage) {
+      return entry.errorMessage;
+    }
+    if (entry.statusCode > 0) {
+      return t('monitor.logs.detail_failed_fallback', { status: entry.statusCode });
+    }
+    return t('monitor.logs.detail_failed_unknown');
+  };
+
   // 渲染单行
   const renderRow = (entry: LogEntry) => {
     const stats = getStats(entry);
     const rateValue = parseFloat(stats.successRate);
     const disabled = isModelDisabled(entry.source, entry.model);
+    const performance = getPerformanceParts(entry);
+    const canShowDetail = !entry.pending && entry.statusCode > 0;
 
     return (
       <>
@@ -418,6 +576,9 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
         <td>{entry.providerType}</td>
         <td title={entry.model}>
           {entry.model}
+        </td>
+        <td title={entry.sessionId || '-'}>
+          {entry.sessionId ? maskSecret(entry.sessionId) : '-'}
         </td>
         <td title={entry.source}>
           {entry.providerName ? (
@@ -430,9 +591,41 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
           )}
         </td>
         <td>
-          <span className={`${styles.statusPill} ${entry.failed ? styles.failed : styles.success}`}>
-            {entry.failed ? t('monitor.logs.failed') : t('monitor.logs.success')}
+          <span
+            className={`${styles.statusPill} ${
+              entry.pending ? styles.pending : entry.failed ? styles.failed : styles.success
+            }`}
+          >
+            {entry.pending
+              ? t('monitor.logs.pending')
+              : entry.failed
+                ? t('monitor.logs.failed')
+                : t('monitor.logs.success')}
           </span>
+        </td>
+        <td>
+          {entry.pending ? (
+            <span className={styles.statusDetailText}>{performance.status}</span>
+          ) : (
+            <div className={styles.perfCell}>
+              {canShowDetail ? (
+                <button
+                  className={styles.statusDetailBtn}
+                  onClick={(event) => handleDetailClick(entry, event)}
+                >
+                  {performance.status}
+                </button>
+              ) : (
+                <span className={styles.statusDetailText}>{performance.status}</span>
+              )}
+              {performance.duration && (
+                <>
+                  <span className={styles.perfSeparator}>·</span>
+                  <span className={styles.perfDuration}>{performance.duration}</span>
+                </>
+              )}
+            </div>
+          )}
         </td>
         <td>
           <div className={styles.statusBars}>
@@ -478,6 +671,7 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
   return (
     <>
       <Card
+        id="monitor-request-logs"
         title={t('monitor.logs.title')}
         subtitle={
           <span>
@@ -548,6 +742,18 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
             <option value="success">{t('monitor.logs.success')}</option>
             <option value="failed">{t('monitor.logs.failed')}</option>
           </select>
+          <select
+            className={styles.logSelect}
+            value={sessionFilter}
+            onChange={(e) => onSessionFilterChange(e.target.value)}
+          >
+            <option value="">{t('monitor.logs.all_sessions')}</option>
+            {sessions.map((session) => (
+              <option key={session} value={session}>
+                {maskSecret(session)}
+              </option>
+            ))}
+          </select>
 
           <span className={styles.logLastUpdate}>
             {getCountdownText()}
@@ -577,14 +783,16 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
             <>
               {/* 固定表头 */}
               <div ref={headerRef} className={styles.stickyHeader}>
-                <table className={`${styles.table} ${styles.virtualTable}`}>
+                <table ref={headerTableRef} className={`${styles.table} ${styles.virtualTable}`}>
                   <thead>
                     <tr>
                       <th>{t('monitor.logs.header_api')}</th>
                       <th>{t('monitor.logs.header_request_type')}</th>
                       <th>{t('monitor.logs.header_model')}</th>
+                      <th>{t('monitor.logs.header_session')}</th>
                       <th>{t('monitor.logs.header_source')}</th>
                       <th>{t('monitor.logs.header_status')}</th>
+                      <th>{t('monitor.logs.header_perf')}</th>
                       <th>{t('monitor.logs.header_recent')}</th>
                       <th>{t('monitor.logs.header_rate')}</th>
                       <th>{t('monitor.logs.header_count')}</th>
@@ -611,7 +819,7 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
                     position: 'relative',
                   }}
                 >
-                  <table className={`${styles.table} ${styles.virtualTable}`}>
+                  <table ref={bodyTableRef} className={`${styles.table} ${styles.virtualTable}`}>
                     <tbody>
                       {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                         const entry = filteredEntries[virtualRow.index];
@@ -648,6 +856,41 @@ export function RequestLogs({ data, loading: parentLoading, providerMap, provide
           </div>
         )}
       </Card>
+
+      <Modal
+        open={!!detailEntry}
+        onClose={() => setDetailEntry(null)}
+        title={t('monitor.logs.detail_title')}
+      >
+        <div className={styles.requestDetail}>
+          <div className={styles.detailRow}>
+            <span className={styles.detailLabel}>{t('monitor.logs.detail_request_id')}</span>
+            <span className={styles.detailValue}>{detailEntry?.requestId || '-'}</span>
+          </div>
+          <div className={styles.detailRow}>
+            <span className={styles.detailLabel}>{t('monitor.logs.detail_status')}</span>
+            <span className={styles.detailValue}>
+              {detailEntry?.statusCode ? `${detailEntry.statusCode}` : '-'}
+            </span>
+          </div>
+          <div className={styles.detailRow}>
+            <span className={styles.detailLabel}>{t('monitor.logs.detail_duration')}</span>
+            <span className={styles.detailValue}>
+              {detailEntry?.durationMs ? `${detailEntry.durationMs}ms` : '-'}
+            </span>
+          </div>
+          <div className={styles.detailRow}>
+            <span className={styles.detailLabel}>{t('monitor.logs.detail_error')}</span>
+            <span className={styles.detailValue}>
+              {detailEntry?.errorMessage || '-'}
+            </span>
+          </div>
+          <div className={styles.detailRow}>
+            <span className={styles.detailLabel}>{t('monitor.logs.detail_failure_reason')}</span>
+            <span className={styles.detailValue}>{getFailureReason(detailEntry)}</span>
+          </div>
+        </div>
+      </Modal>
 
       {/* 禁用确认弹窗 */}
       <DisableModelModal

@@ -44,9 +44,9 @@
   }
 
   &.btn-secondary {
-    background-color: #fff;
-    border: var(--brutal-border);
-    color: var(--text-primary);
+      background-color: var(--bg-primary);
+      border: var(--brutal-border);
+      color: var(--text-primary);
 
     &:hover {
       background-color: var(--bg-tertiary);

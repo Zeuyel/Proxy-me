@@ -16,11 +16,13 @@ import {
   Filler
 } from 'chart.js';
 import { Button } from '@/components/ui/Button';
+import { Card } from '@/components/ui/Card';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useThemeStore } from '@/stores';
 import { usageApi, providersApi, authFilesApi } from '@/services/api';
 import { normalizeAuthIndexValue } from '@/utils/quota/parsers';
+import { maskSecret, formatTimestamp } from '@/utils/monitor';
 import { KpiCards } from '@/components/monitor/KpiCards';
 import { ModelDistributionChart } from '@/components/monitor/ModelDistributionChart';
 import { DailyTrendChart } from '@/components/monitor/DailyTrendChart';
@@ -55,6 +57,8 @@ export interface UsageDetail {
   failed: boolean;
   source: string;
   auth_index: string;
+  request_id?: string;
+  session_id?: string;
   tokens: {
     input_tokens: number;
     output_tokens: number;
@@ -76,6 +80,7 @@ export function MonitorPage() {
   const { t } = useTranslation();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const isDark = resolvedTheme === 'dark';
+  const sessionWindowMinutes = 30;
 
   // 状态
   const [loading, setLoading] = useState(true);
@@ -87,6 +92,7 @@ export function MonitorPage() {
   const [providerModels, setProviderModels] = useState<Record<string, Set<string>>>({});
   const [providerTypeMap, setProviderTypeMap] = useState<Record<string, string>>({});
   const [authIndexMap, setAuthIndexMap] = useState<Record<string, string>>({});
+  const [sessionFilter, setSessionFilter] = useState('');
 
   // 加载渠道名称映射（支持所有提供商类型）
   const loadProviderMap = useCallback(async () => {
@@ -312,6 +318,49 @@ export function MonitorPage() {
     loadData();
   };
 
+  const activeSessions = useMemo(() => {
+    if (!filteredData?.apis) {
+      return [];
+    }
+    const cutoff = new Date(Date.now() - sessionWindowMinutes * 60 * 1000);
+    const sessionMap = new Map<string, { count: number; lastSeen: Date }>();
+
+    Object.values(filteredData.apis).forEach((apiData) => {
+      Object.values(apiData.models).forEach((modelData) => {
+        modelData.details.forEach((detail) => {
+          if (!detail.session_id) return;
+          const timestamp = new Date(detail.timestamp);
+          if (timestamp < cutoff) return;
+          const existing = sessionMap.get(detail.session_id);
+          if (!existing) {
+            sessionMap.set(detail.session_id, { count: 1, lastSeen: timestamp });
+            return;
+          }
+          existing.count += 1;
+          if (timestamp > existing.lastSeen) {
+            existing.lastSeen = timestamp;
+          }
+        });
+      });
+    });
+
+    return Array.from(sessionMap.entries())
+      .map(([sessionId, stats]) => ({
+        sessionId,
+        count: stats.count,
+        lastSeen: stats.lastSeen,
+      }))
+      .sort((a, b) => b.lastSeen.getTime() - a.lastSeen.getTime());
+  }, [filteredData, sessionWindowMinutes]);
+
+  const handleSessionJump = (sessionId: string) => {
+    setSessionFilter(sessionId);
+    const target = document.getElementById('monitor-request-logs');
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
+
   return (
     <div className={styles.container}>
       {loading && !usageData && (
@@ -372,6 +421,41 @@ export function MonitorPage() {
         </div>
       </div>
 
+      {/* 活跃 Session */}
+      <Card
+        title={t('monitor.active_sessions.title')}
+        subtitle={t('monitor.active_sessions.subtitle', { minutes: sessionWindowMinutes })}
+        extra={
+          <span className={styles.filterLabel}>
+            {t('monitor.active_sessions.count', { count: activeSessions.length })}
+          </span>
+        }
+      >
+        <div className={styles.activeSessions}>
+          {activeSessions.length === 0 ? (
+            <div className={styles.sessionEmpty}>{t('monitor.active_sessions.empty')}</div>
+          ) : (
+            <div className={styles.sessionList}>
+              {activeSessions.map((session) => (
+                <button
+                  key={session.sessionId}
+                  className={`${styles.sessionChip} ${sessionFilter === session.sessionId ? styles.sessionChipActive : ''}`}
+                  onClick={() => handleSessionJump(session.sessionId)}
+                >
+                  <span className={styles.sessionId}>{maskSecret(session.sessionId)}</span>
+                  <span className={styles.sessionMeta}>
+                    {t('monitor.active_sessions.meta', {
+                      count: session.count,
+                      last: formatTimestamp(session.lastSeen.toISOString()),
+                    })}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </Card>
+
       {/* KPI 卡片 */}
       <KpiCards data={filteredData} loading={loading} timeRange={timeRange} />
 
@@ -410,6 +494,8 @@ export function MonitorPage() {
         providerMap={providerMap}
         providerTypeMap={providerTypeMap}
         apiFilter={apiFilter}
+        sessionFilter={sessionFilter}
+        onSessionFilterChange={setSessionFilter}
       />
     </div>
   );

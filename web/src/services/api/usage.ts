@@ -22,6 +22,26 @@ export interface UsageImportResponse {
   [key: string]: unknown;
 }
 
+export interface MonitorRequestLogEntry {
+  id: string;
+  method: string;
+  path: string;
+  api_key?: string;
+  request_type?: string;
+  model?: string;
+  session_id?: string;
+  status_code?: number;
+  error_message?: string;
+  started_at?: string;
+  completed_at?: string;
+  duration_ms?: number;
+  pending?: boolean;
+}
+
+export interface MonitorRequestLogsResponse {
+  logs?: MonitorRequestLogEntry[];
+}
+
 export const usageApi = {
   /**
    * 获取使用统计原始数据
@@ -38,6 +58,12 @@ export const usageApi = {
    */
   importUsage: (payload: unknown) =>
     apiClient.post<UsageImportResponse>('/usage/import', payload, { timeout: USAGE_TIMEOUT_MS }),
+
+  getMonitorRequestLogs: (limit = 200) =>
+    apiClient.get<MonitorRequestLogsResponse>('/monitor/request-logs', {
+      params: { limit },
+      timeout: USAGE_TIMEOUT_MS
+    }),
 
   /**
    * 计算密钥成功/失败统计，必要时会先获取 usage 数据
