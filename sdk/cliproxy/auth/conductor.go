@@ -1593,7 +1593,14 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
+	clientKey := clientAPIKeyFromOptions(opts)
+	allowedRefs, restricted := m.allowedAuthRefsForClientKey(clientKey)
+	if restricted && len(allowedRefs) == 0 {
+		m.mu.RUnlock()
+		return nil, nil, &Error{Code: "access_denied", Message: "API key has no permitted accounts", HTTPStatus: http.StatusForbidden}
+	}
 	candidates := make([]*Auth, 0, len(m.auths))
+	allowedMatch := false
 	modelKey := strings.TrimSpace(model)
 	// Always use base model name (without thinking suffix) for auth matching.
 	if modelKey != "" {
@@ -1604,7 +1611,17 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	}
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
-		if candidate.Provider != provider || candidate.Disabled {
+		if candidate.Provider != provider {
+			continue
+		}
+		if restricted {
+			if authMatchesAllowedRefs(candidate, allowedRefs) {
+				allowedMatch = true
+			} else {
+				continue
+			}
+		}
+		if candidate.Disabled {
 			continue
 		}
 		if _, used := tried[candidate.ID]; used {
@@ -1616,6 +1633,10 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
+		if restricted && !allowedMatch {
+			m.mu.RUnlock()
+			return nil, nil, &Error{Code: "access_denied", Message: "API key is not authorized for this provider", HTTPStatus: http.StatusForbidden}
+		}
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
@@ -1655,7 +1676,14 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	}
 
 	m.mu.RLock()
+	clientKey := clientAPIKeyFromOptions(opts)
+	allowedRefs, restricted := m.allowedAuthRefsForClientKey(clientKey)
+	if restricted && len(allowedRefs) == 0 {
+		m.mu.RUnlock()
+		return nil, nil, "", &Error{Code: "access_denied", Message: "API key has no permitted accounts", HTTPStatus: http.StatusForbidden}
+	}
 	candidates := make([]*Auth, 0, len(m.auths))
+	allowedMatch := false
 	modelKey := strings.TrimSpace(model)
 	// Always use base model name (without thinking suffix) for auth matching.
 	if modelKey != "" {
@@ -1666,7 +1694,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	}
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
-		if candidate == nil || candidate.Disabled {
+		if candidate == nil {
 			continue
 		}
 		providerKey := strings.TrimSpace(strings.ToLower(candidate.Provider))
@@ -1674,6 +1702,16 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			continue
 		}
 		if _, ok := providerSet[providerKey]; !ok {
+			continue
+		}
+		if restricted {
+			if authMatchesAllowedRefs(candidate, allowedRefs) {
+				allowedMatch = true
+			} else {
+				continue
+			}
+		}
+		if candidate.Disabled {
 			continue
 		}
 		if _, used := tried[candidate.ID]; used {
@@ -1688,6 +1726,10 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
+		if restricted && !allowedMatch {
+			m.mu.RUnlock()
+			return nil, nil, "", &Error{Code: "access_denied", Message: "API key is not authorized for this provider", HTTPStatus: http.StatusForbidden}
+		}
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}

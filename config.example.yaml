@@ -37,6 +37,15 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Per-client API key account permissions
+# Map a client API key to allowed auth accounts (auth ID, auth index, or auth file name).
+# If a client key is not listed, it can access all accounts (default behavior).
+# api-key-auth:
+#   "your-api-key-1":
+#     - "auth_id_or_index_or_filename"
+#     - "another-auth-id"
+#   "your-api-key-2": []  # Optional: empty list means no accounts (deny all)
+
 # Enable debug logging
 debug: false
 

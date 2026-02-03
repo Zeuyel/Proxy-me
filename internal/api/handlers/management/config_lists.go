@@ -119,6 +119,37 @@ func (h *Handler) DeleteAPIKeys(c *gin.Context) {
 	h.deleteFromStringList(c, &h.cfg.APIKeys, func() { h.cfg.Access.Providers = nil })
 }
 
+// api-key-auth
+func (h *Handler) GetAPIKeyAuth(c *gin.Context) {
+	mapping := h.cfg.APIKeyAuth
+	if mapping == nil {
+		mapping = map[string][]string{}
+	}
+	c.JSON(200, gin.H{"api-key-auth": mapping})
+}
+
+func (h *Handler) PutAPIKeyAuth(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var mapping map[string][]string
+	if err = json.Unmarshal(data, &mapping); err != nil {
+		var obj struct {
+			Mapping map[string][]string `json:"api-key-auth"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		mapping = obj.Mapping
+	}
+	clean := config.NormalizeAPIKeyAuth(mapping)
+	h.cfg.APIKeyAuth = clean
+	h.persist(c)
+}
+
 // gemini-api-key: []GeminiKey
 func (h *Handler) GetGeminiKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"gemini-api-key": h.cfg.GeminiKey})

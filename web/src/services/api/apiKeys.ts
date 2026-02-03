@@ -4,6 +4,8 @@
 
 import { apiClient } from './client';
 
+export type APIKeyAuthMap = Record<string, string[]>;
+
 export const apiKeysApi = {
   async list(): Promise<string[]> {
     const data = await apiClient.get('/api-keys');
@@ -15,5 +17,13 @@ export const apiKeysApi = {
 
   update: (index: number, value: string) => apiClient.patch('/api-keys', { index, value }),
 
-  delete: (index: number) => apiClient.delete(`/api-keys?index=${index}`)
+  delete: (index: number) => apiClient.delete(`/api-keys?index=${index}`),
+
+  async getAuthMapping(): Promise<APIKeyAuthMap> {
+    const data = await apiClient.get('/api-key-auth');
+    const mapping = (data && (data['api-key-auth'] ?? data.apiKeyAuth)) as unknown;
+    return mapping && typeof mapping === 'object' ? (mapping as APIKeyAuthMap) : {};
+  },
+
+  updateAuthMapping: (mapping: APIKeyAuthMap) => apiClient.put('/api-key-auth', mapping)
 };

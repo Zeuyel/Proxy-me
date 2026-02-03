@@ -750,6 +750,96 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 	return models
 }
 
+// GetAvailableModelsForClients returns available models restricted to the supplied client IDs.
+// It mirrors availability rules from GetAvailableModels but only counts allowed clients.
+func (r *ModelRegistry) GetAvailableModelsForClients(handlerType string, clients map[string]struct{}) []map[string]any {
+	if len(clients) == 0 {
+		return r.GetAvailableModels(handlerType)
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	type counts struct {
+		total       int
+		expired     int
+		cooldown    int
+		otherPaused int
+	}
+
+	perModel := make(map[string]*counts, len(r.models))
+	quotaExpiredDuration := 5 * time.Minute
+	now := time.Now()
+
+	for clientID := range clients {
+		modelIDs, exists := r.clientModels[clientID]
+		if !exists || len(modelIDs) == 0 {
+			continue
+		}
+		for _, rawID := range modelIDs {
+			modelID := strings.TrimSpace(rawID)
+			if modelID == "" {
+				continue
+			}
+			c := perModel[modelID]
+			if c == nil {
+				c = &counts{}
+				perModel[modelID] = c
+			}
+			c.total++
+
+			reg := r.models[modelID]
+			if reg == nil {
+				continue
+			}
+			if reg.QuotaExceededClients != nil {
+				if quotaTime := reg.QuotaExceededClients[clientID]; quotaTime != nil && now.Sub(*quotaTime) < quotaExpiredDuration {
+					c.expired++
+				}
+			}
+			if reg.SuspendedClients != nil {
+				if reason, ok := reg.SuspendedClients[clientID]; ok {
+					if strings.EqualFold(reason, "quota") {
+						c.cooldown++
+					} else {
+						c.otherPaused++
+					}
+				}
+			}
+		}
+	}
+
+	if len(perModel) == 0 {
+		return nil
+	}
+
+	models := make([]map[string]any, 0, len(perModel))
+	for modelID, c := range perModel {
+		if c == nil || c.total == 0 {
+			continue
+		}
+		reg := r.models[modelID]
+		if reg == nil || reg.Info == nil {
+			continue
+		}
+		effective := c.total - c.expired - c.otherPaused
+		if effective < 0 {
+			effective = 0
+		}
+		if effective == 0 {
+			if !(c.total > 0 && (c.expired > 0 || c.cooldown > 0) && c.otherPaused == 0) {
+				continue
+			}
+		}
+		model := r.convertModelToMap(reg.Info, handlerType)
+		if model != nil {
+			models = append(models, model)
+		}
+	}
+
+	return models
+}
+
 // GetAvailableModelsByProvider returns models available for the given provider identifier.
 // Parameters:
 //   - provider: Provider identifier (e.g., "codex", "gemini", "antigravity")

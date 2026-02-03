@@ -119,6 +119,11 @@ type Config struct {
 	// Keys can be auth ID, auth index, or auth file name.
 	ProxyRoutingAuth map[string]string `yaml:"proxy-routing-auth,omitempty" json:"proxy-routing-auth,omitempty"`
 
+	// APIKeyAuth defines which auth accounts each client API key can access.
+	// Keys are client API keys (from top-level api-keys). Values can be auth ID, auth index, or auth file name.
+	// When a client key is not listed, it can access all accounts (default behavior).
+	APIKeyAuth map[string][]string `yaml:"api-key-auth,omitempty" json:"api-key-auth,omitempty"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -595,6 +600,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sync request authentication providers with inline API keys for backwards compatibility.
 	syncInlineAccessProvider(&cfg)
 
+	// Normalize per-client API key auth permissions.
+	cfg.SanitizeAPIKeyAuth()
+
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
@@ -642,6 +650,14 @@ func (cfg *Config) SanitizePayloadRules() {
 	}
 	cfg.Payload.DefaultRaw = sanitizePayloadRawRules(cfg.Payload.DefaultRaw, "default-raw")
 	cfg.Payload.OverrideRaw = sanitizePayloadRawRules(cfg.Payload.OverrideRaw, "override-raw")
+}
+
+// SanitizeAPIKeyAuth normalizes per-client API key auth permissions.
+func (cfg *Config) SanitizeAPIKeyAuth() {
+	if cfg == nil {
+		return
+	}
+	cfg.APIKeyAuth = NormalizeAPIKeyAuth(cfg.APIKeyAuth)
 }
 
 func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule {
@@ -840,6 +856,40 @@ func syncInlineAccessProvider(cfg *Config) {
 // looksLikeBcrypt returns true if the provided string appears to be a bcrypt hash.
 func looksLikeBcrypt(s string) bool {
 	return len(s) > 4 && (s[:4] == "$2a$" || s[:4] == "$2b$" || s[:4] == "$2y$")
+}
+
+// NormalizeAPIKeyAuth trims API key auth permission entries, drops empty values,
+// and de-duplicates auth references while preserving order.
+// Empty auth lists are preserved to allow explicit deny rules.
+func NormalizeAPIKeyAuth(entries map[string][]string) map[string][]string {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(entries))
+	for rawKey, auths := range entries {
+		key := strings.TrimSpace(rawKey)
+		if key == "" {
+			continue
+		}
+		seen := make(map[string]struct{}, len(auths))
+		clean := make([]string, 0, len(auths))
+		for _, raw := range auths {
+			ref := strings.TrimSpace(raw)
+			if ref == "" {
+				continue
+			}
+			if _, exists := seen[ref]; exists {
+				continue
+			}
+			seen[ref] = struct{}{}
+			clean = append(clean, ref)
+		}
+		out[key] = clean
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // NormalizeHeaders trims header keys and values and removes empty pairs.

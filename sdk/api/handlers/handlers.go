@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -69,6 +70,25 @@ const (
 )
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:\-]+$`)
+
+func clientAPIKeyFromGin(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	if v, exists := c.Get("apiKey"); exists {
+		switch typed := v.(type) {
+		case string:
+			return strings.TrimSpace(typed)
+		case []byte:
+			return strings.TrimSpace(string(typed))
+		case fmt.Stringer:
+			return strings.TrimSpace(typed.String())
+		default:
+			return strings.TrimSpace(fmt.Sprint(typed))
+		}
+	}
+	return ""
+}
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
 // If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
@@ -162,15 +182,21 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
 	// It is forwarded as execution metadata; when absent we generate a UUID.
 	key := ""
+	clientKey := ""
 	if ctx != nil {
 		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
+			clientKey = clientAPIKeyFromGin(ginCtx)
 		}
 	}
 	if key == "" {
 		key = uuid.NewString()
 	}
-	return map[string]any{idempotencyKeyMetadataKey: key}
+	meta := map[string]any{idempotencyKeyMetadataKey: key}
+	if clientKey != "" {
+		meta[coreexecutor.ClientAPIKeyMetadataKey] = clientKey
+	}
+	return meta
 }
 
 func updateMonitorRequestContext(ctx context.Context, requestType, model, sessionID string) {
@@ -346,6 +372,26 @@ func (h *BaseAPIHandler) GetAlt(c *gin.Context) string {
 		return ""
 	}
 	return alt
+}
+
+// AvailableModelsForRequest returns models filtered by the requesting client API key (if restricted).
+func (h *BaseAPIHandler) AvailableModelsForRequest(c *gin.Context, handlerType string) []map[string]any {
+	modelRegistry := registry.GetGlobalRegistry()
+	if modelRegistry == nil {
+		return nil
+	}
+	clientKey := clientAPIKeyFromGin(c)
+	if clientKey == "" || h == nil || h.AuthManager == nil {
+		return modelRegistry.GetAvailableModels(handlerType)
+	}
+	allowed, restricted := h.AuthManager.AllowedAuthIDsForClientKey(clientKey)
+	if !restricted {
+		return modelRegistry.GetAvailableModels(handlerType)
+	}
+	if len(allowed) == 0 {
+		return []map[string]any{}
+	}
+	return modelRegistry.GetAvailableModelsForClients(handlerType, allowed)
 }
 
 // GetContextWithCancel creates a new context with cancellation capabilities.

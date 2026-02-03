@@ -234,6 +234,38 @@ const normalizeAmpcodeConfig = (payload: any): AmpcodeConfig | undefined => {
   return config;
 };
 
+const normalizeApiKeyAuth = (payload: any): Record<string, string[]> | undefined => {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const record = payload as Record<string, unknown>;
+  const source = record['api-key-auth'] ?? record.apiKeyAuth ?? payload;
+  if (!source || typeof source !== 'object') return undefined;
+
+  const result: Record<string, string[]> = {};
+  Object.entries(source as Record<string, unknown>).forEach(([rawKey, rawValue]) => {
+    const key = String(rawKey ?? '').trim();
+    if (!key) return;
+    if (Array.isArray(rawValue)) {
+      const cleaned = rawValue
+        .map((val) => String(val ?? '').trim())
+        .filter(Boolean);
+      result[key] = cleaned;
+      return;
+    }
+    if (rawValue == null) {
+      result[key] = [];
+      return;
+    }
+    const text = String(rawValue ?? '').trim();
+    if (!text) {
+      result[key] = [];
+      return;
+    }
+    result[key] = text.split(/[\n,]+/).map((val) => String(val).trim()).filter(Boolean);
+  });
+
+  return Object.keys(result).length ? result : {};
+};
+
 /**
  * 规范化 /config 返回值
  */
@@ -268,6 +300,10 @@ export const normalizeConfigResponse = (raw: any): Config => {
     config.routingStrategy = raw['routing-strategy'] ?? raw.routingStrategy;
   }
   config.apiKeys = Array.isArray(raw['api-keys']) ? raw['api-keys'].slice() : raw.apiKeys;
+  const apiKeyAuth = normalizeApiKeyAuth(raw);
+  if (apiKeyAuth) {
+    config.apiKeyAuth = apiKeyAuth;
+  }
 
   const geminiList = raw['gemini-api-key'] ?? raw.geminiApiKey ?? raw.geminiApiKeys;
   if (Array.isArray(geminiList)) {
