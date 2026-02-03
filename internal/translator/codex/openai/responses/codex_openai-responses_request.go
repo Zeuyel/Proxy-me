@@ -16,6 +16,12 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	userAgent := misc.ExtractCodexUserAgent(rawJSON)
 	rawJSON = misc.StripCodexUserAgent(rawJSON)
 
+	inputResult := gjson.GetBytes(rawJSON, "input")
+	if inputResult.Type == gjson.String {
+		input, _ := sjson.Set(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`, "0.content.0.text", inputResult.String())
+		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", []byte(input))
+	}
+
 	rawJSON, _ = sjson.SetBytes(rawJSON, "stream", true)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "store", false)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
