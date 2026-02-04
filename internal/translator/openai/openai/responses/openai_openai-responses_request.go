@@ -170,8 +170,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			// Only function tools need structural conversion because Chat Completions nests details under "function".
 			toolType := tool.Get("type").String()
 			if toolType != "" && toolType != "function" && tool.IsObject() {
-				// Almost all providers lack built-in tools, so we just ignore them.
-				// chatCompletionsTools = append(chatCompletionsTools, tool.Value())
+				// Preserve built-in tools for OpenAI -> OpenAI conversions (tests expect this).
+				chatCompletionsTools = append(chatCompletionsTools, tool.Value())
 				return true
 			}
 

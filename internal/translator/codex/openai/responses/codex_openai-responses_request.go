@@ -43,7 +43,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 
 	hasOfficialInstructions, instructions := misc.CodexInstructionsForModel(modelName, originalInstructionsResult.String(), userAgent)
 
-	inputResult := gjson.GetBytes(rawJSON, "input")
+	inputResult = gjson.GetBytes(rawJSON, "input")
 	var inputResults []gjson.Result
 	if inputResult.Exists() {
 		if inputResult.IsArray() {
