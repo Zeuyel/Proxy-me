@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
@@ -133,6 +134,11 @@ type Config struct {
 	// Keys are client API keys (from top-level api-keys). Values can be auth ID, auth index, or auth file name.
 	// When a client key is not listed, it can access all accounts (default behavior).
 	APIKeyAuth map[string][]string `yaml:"api-key-auth,omitempty" json:"api-key-auth,omitempty"`
+
+	// APIKeyExpiry defines per-client API key expiration timestamps.
+	// Keys are client API keys (from top-level api-keys). Values are RFC3339 timestamps.
+	// If a key is not listed, it never expires.
+	APIKeyExpiry map[string]string `yaml:"api-key-expiry,omitempty" json:"api-key-expiry,omitempty"`
 
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
@@ -643,6 +649,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Normalize per-client API key auth permissions.
 	cfg.SanitizeAPIKeyAuth()
 
+	// Normalize per-client API key expiry timestamps.
+	cfg.SanitizeAPIKeyExpiry()
+
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
@@ -698,6 +707,14 @@ func (cfg *Config) SanitizeAPIKeyAuth() {
 		return
 	}
 	cfg.APIKeyAuth = NormalizeAPIKeyAuth(cfg.APIKeyAuth)
+}
+
+// SanitizeAPIKeyExpiry normalizes per-client API key expiry timestamps.
+func (cfg *Config) SanitizeAPIKeyExpiry() {
+	if cfg == nil {
+		return
+	}
+	cfg.APIKeyExpiry = NormalizeAPIKeyExpiry(cfg.APIKeyExpiry)
 }
 
 func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule {
@@ -925,6 +942,37 @@ func NormalizeAPIKeyAuth(entries map[string][]string) map[string][]string {
 			clean = append(clean, ref)
 		}
 		out[key] = clean
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// NormalizeAPIKeyExpiry trims keys and values, drops empty/invalid entries, and
+// normalizes timestamps to RFC3339.
+func NormalizeAPIKeyExpiry(entries map[string]string) map[string]string {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(entries))
+	for rawKey, rawValue := range entries {
+		key := strings.TrimSpace(rawKey)
+		if key == "" {
+			continue
+		}
+		val := strings.TrimSpace(rawValue)
+		if val == "" {
+			// Empty means "no expiry"; represent by absence.
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339, val)
+		if err != nil {
+			// Avoid logging full API keys.
+			log.Warn("api-key-expiry entry dropped: invalid RFC3339 timestamp")
+			continue
+		}
+		out[key] = ts.Format(time.RFC3339)
 	}
 	if len(out) == 0 {
 		return nil
@@ -1884,4 +1932,3 @@ type ProxyRouting struct {
 	// IFlow specifies the reverse proxy ID for IFlow requests.
 	IFlow string `yaml:"iflow,omitempty" json:"iflow,omitempty"`
 }
-

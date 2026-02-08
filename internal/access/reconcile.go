@@ -81,7 +81,7 @@ func ReconcileProviders(oldCfg, newCfg *config.Config, existing []sdkaccess.Prov
 	}
 
 	if len(result) == 0 {
-		if inline := sdkConfig.MakeInlineAPIKeyProvider(newCfg.APIKeys); inline != nil {
+		if inline := inlineAPIKeyProvider(newCfg); inline != nil {
 			key := providerIdentifier(inline)
 			if key != "" {
 				if oldCfgProvider, ok := oldCfgMap[key]; ok {
@@ -176,8 +176,8 @@ func accessProviderMap(cfg *config.Config) map[string]*sdkConfig.AccessProvider 
 		}
 		result[key] = providerCfg
 	}
-	if len(result) == 0 && len(cfg.APIKeys) > 0 {
-		if provider := sdkConfig.MakeInlineAPIKeyProvider(cfg.APIKeys); provider != nil {
+	if len(result) == 0 {
+		if provider := inlineAPIKeyProvider(cfg); provider != nil {
 			if key := providerIdentifier(provider); key != "" {
 				result[key] = provider
 			}
@@ -197,12 +197,30 @@ func collectProviderEntries(cfg *config.Config) []*sdkConfig.AccessProvider {
 			entries = append(entries, providerCfg)
 		}
 	}
-	if len(entries) == 0 && len(cfg.APIKeys) > 0 {
-		if inline := sdkConfig.MakeInlineAPIKeyProvider(cfg.APIKeys); inline != nil {
+	if len(entries) == 0 {
+		if inline := inlineAPIKeyProvider(cfg); inline != nil {
 			entries = append(entries, inline)
 		}
 	}
 	return entries
+}
+
+func inlineAPIKeyProvider(cfg *config.Config) *sdkConfig.AccessProvider {
+	if cfg == nil || len(cfg.APIKeys) == 0 {
+		return nil
+	}
+	provider := sdkConfig.MakeInlineAPIKeyProvider(cfg.APIKeys)
+	if provider == nil {
+		return nil
+	}
+	if len(cfg.APIKeyExpiry) > 0 {
+		if provider.Config == nil {
+			provider.Config = make(map[string]any, 1)
+		}
+		// Pass expiry mapping to the access provider so it can enforce expiration at auth time.
+		provider.Config["api-key-expiry"] = cfg.APIKeyExpiry
+	}
+	return provider
 }
 
 func providerIdentifier(provider *sdkConfig.AccessProvider) string {

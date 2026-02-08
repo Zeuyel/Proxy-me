@@ -127,6 +127,9 @@ type Server struct {
 	// cfg holds the current server configuration.
 	cfg *config.Config
 
+	// authManager provides access to auth file metadata for API-key scoped endpoints.
+	authManager *auth.Manager
+
 	// oldConfigYaml stores a YAML snapshot of the previous configuration for change detection.
 	// This prevents issues when the config object is modified in place by Management API.
 	oldConfigYaml []byte
@@ -239,6 +242,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		engine:              engine,
 		handlers:            handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
 		cfg:                 cfg,
+		authManager:         authManager,
 		accessManager:       accessManager,
 		requestLogger:       requestLogger,
 		loggerToggle:        toggle,
@@ -336,6 +340,13 @@ func (s *Server) setupRoutes() {
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
 		v1beta.GET("/models/*action", geminiHandlers.GeminiGetHandler)
+	}
+
+	// Client-scoped endpoints (API-key auth; no management key required).
+	v0client := s.engine.Group("/v0/client")
+	v0client.Use(AuthMiddleware(s.accessManager))
+	{
+		v0client.GET("/usage/auth-files", s.GetClientAuthFileUsage)
 	}
 
 	// Root endpoint
@@ -545,6 +556,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/api-key-auth", s.mgmt.GetAPIKeyAuth)
 		mgmt.PUT("/api-key-auth", s.mgmt.PutAPIKeyAuth)
 		mgmt.PATCH("/api-key-auth", s.mgmt.PutAPIKeyAuth)
+		mgmt.GET("/api-key-expiry", s.mgmt.GetAPIKeyExpiry)
+		mgmt.PUT("/api-key-expiry", s.mgmt.PutAPIKeyExpiry)
+		mgmt.PATCH("/api-key-expiry", s.mgmt.PutAPIKeyExpiry)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -601,6 +615,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/routing/strategy", s.mgmt.GetRoutingStrategy)
 		mgmt.PUT("/routing/strategy", s.mgmt.PutRoutingStrategy)
 		mgmt.PATCH("/routing/strategy", s.mgmt.PutRoutingStrategy)
+
+		mgmt.GET("/routing/session", s.mgmt.GetRoutingSession)
+		mgmt.PUT("/routing/session", s.mgmt.PutRoutingSession)
+		mgmt.PATCH("/routing/session", s.mgmt.PutRoutingSession)
 
 		mgmt.GET("/claude-api-key", s.mgmt.GetClaudeKeys)
 		mgmt.PUT("/claude-api-key", s.mgmt.PutClaudeKeys)
@@ -1065,9 +1083,94 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Missing API key"})
 		case errors.Is(err, sdkaccess.ErrInvalidCredential):
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
+		case errors.Is(err, sdkaccess.ErrExpiredCredential):
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "API key expired"})
 		default:
 			log.Errorf("authentication middleware error: %v", err)
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Authentication service error"})
 		}
 	}
+}
+
+// GetClientAuthFileUsage returns usage statistics for auth files accessible to the client API key.
+func (s *Server) GetClientAuthFileUsage(c *gin.Context) {
+	// Get the authenticated API key from context
+	apiKey, _ := c.Get("apiKey")
+	clientKey, _ := apiKey.(string)
+
+	// Check if usage statistics are enabled
+	usageEnabled := s.cfg.UsageStatisticsEnabled
+
+	// Get allowed auth accounts for this API key
+	allowedAuths := s.cfg.APIKeyAuth[clientKey]
+	restricted := len(allowedAuths) > 0
+
+	// Build response
+	type authFileUsage struct {
+		AuthID    string `json:"auth_id"`
+		AuthIndex string `json:"auth_index"`
+		Provider  string `json:"provider"`
+		Label     string `json:"label,omitempty"`
+		FileName  string `json:"file_name,omitempty"`
+		Account   string `json:"account,omitempty"`
+		Disabled  bool   `json:"disabled,omitempty"`
+		Usage     struct {
+			TotalRequests int `json:"total_requests"`
+			SuccessCount  int `json:"success_count"`
+			FailureCount  int `json:"failure_count"`
+			TotalTokens   int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+
+	var authFiles []authFileUsage
+	totals := struct {
+		TotalRequests int `json:"total_requests"`
+		SuccessCount  int `json:"success_count"`
+		FailureCount  int `json:"failure_count"`
+		TotalTokens   int `json:"total_tokens"`
+	}{}
+
+	// Get auth files from auth manager
+	if s.authManager != nil {
+		allAuths := s.authManager.List()
+		allowedSet := make(map[string]struct{})
+		for _, a := range allowedAuths {
+			allowedSet[a] = struct{}{}
+		}
+
+		for _, a := range allAuths {
+			// If restricted, only include allowed auths
+			if restricted {
+				_, byID := allowedSet[a.ID]
+				_, byIndex := allowedSet[a.Index]
+				_, byFile := allowedSet[a.FileName]
+				if !byID && !byIndex && !byFile {
+					continue
+				}
+			}
+
+			af := authFileUsage{
+				AuthID:    a.ID,
+				AuthIndex: a.Index,
+				Provider:  a.Provider,
+				FileName:  a.FileName,
+				Disabled:  a.Disabled,
+			}
+			if a.Label != "" {
+				af.Label = a.Label
+			}
+			authFiles = append(authFiles, af)
+		}
+	}
+
+	if authFiles == nil {
+		authFiles = []authFileUsage{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"usage_statistics_enabled": usageEnabled,
+		"restricted":               restricted,
+		"totals":                   totals,
+		"auth_files":               authFiles,
+	})
 }

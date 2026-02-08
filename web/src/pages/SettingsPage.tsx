@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { useAuthStore, useConfigStore, useNotificationStore } from '@/stores';
 import { configApi } from '@/services/api';
-import type { Config } from '@/types';
+import type { Config, SessionRoutingConfig } from '@/types';
 import styles from './Settings/Settings.module.scss';
 
 type PendingKey =
@@ -16,6 +16,7 @@ type PendingKey =
   | 'logsMaxSize'
   | 'forceModelPrefix'
   | 'routingStrategy'
+  | 'sessionRouting'
   | 'switchProject'
   | 'switchPreview'
   | 'usage'
@@ -36,6 +37,7 @@ export function SettingsPage() {
   const [retryValue, setRetryValue] = useState(0);
   const [logsMaxTotalSizeMb, setLogsMaxTotalSizeMb] = useState(0);
   const [routingStrategy, setRoutingStrategy] = useState('round-robin');
+  const [sessionConfig, setSessionConfig] = useState<SessionRoutingConfig>({ enabled: false });
   const [pending, setPending] = useState<Record<PendingKey, boolean>>({} as Record<PendingKey, boolean>);
   const [error, setError] = useState('');
 
@@ -46,11 +48,12 @@ export function SettingsPage() {
       setLoading(true);
       setError('');
       try {
-        const [configResult, logsResult, prefixResult, routingResult] = await Promise.allSettled([
+        const [configResult, logsResult, prefixResult, routingResult, sessionResult] = await Promise.allSettled([
           fetchConfig(),
           configApi.getLogsMaxTotalSizeMb(),
           configApi.getForceModelPrefix(),
           configApi.getRoutingStrategy(),
+          configApi.getRoutingSession(),
         ]);
 
         if (configResult.status !== 'fulfilled') {
@@ -73,6 +76,11 @@ export function SettingsPage() {
         if (routingResult.status === 'fulfilled' && routingResult.value) {
           setRoutingStrategy(String(routingResult.value));
           updateConfigValue('routing/strategy', String(routingResult.value));
+        }
+
+        if (sessionResult.status === 'fulfilled' && sessionResult.value) {
+          setSessionConfig(sessionResult.value);
+          updateConfigValue('routing/session', sessionResult.value);
         }
       } catch (err: any) {
         setError(err?.message || t('notification.refresh_failed'));
@@ -246,6 +254,27 @@ export function SettingsPage() {
     }
   };
 
+  const handleSessionRoutingUpdate = async () => {
+    const previous = { ...sessionConfig };
+    setPendingFlag('sessionRouting', true);
+    updateConfigValue('routing/session', sessionConfig);
+    try {
+      await configApi.updateRoutingSession(sessionConfig);
+      clearCache('routing/session');
+      showNotification(t('notification.session_routing_updated'), 'success');
+    } catch (err: any) {
+      setSessionConfig(previous);
+      updateConfigValue('routing/session', previous);
+      showNotification(`${t('notification.update_failed')}: ${err?.message || ''}`, 'error');
+    } finally {
+      setPendingFlag('sessionRouting', false);
+    }
+  };
+
+  const updateSessionField = <K extends keyof SessionRoutingConfig>(field: K, value: SessionRoutingConfig[K]) => {
+    setSessionConfig((prev) => ({ ...prev, [field]: value }));
+  };
+
   const quotaSwitchProject = config?.quotaExceeded?.switchProject ?? false;
   const quotaSwitchPreview = config?.quotaExceeded?.switchPreviewModel ?? false;
 
@@ -417,6 +446,75 @@ export function SettingsPage() {
             disabled={disableControls || loading}
           >
             {t('basic_settings.routing_strategy_update')}
+          </Button>
+        </div>
+      </Card>
+
+      <Card title={t('basic_settings.session_routing_title')}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <ToggleSwitch
+            label={t('basic_settings.session_routing_enable')}
+            checked={sessionConfig.enabled}
+            disabled={disableControls || pending.sessionRouting || loading}
+            onChange={(value) => updateSessionField('enabled', value)}
+          />
+          <div className="hint" style={{ marginTop: -8 }}>{t('basic_settings.session_routing_hint')}</div>
+
+          {sessionConfig.enabled && (
+            <>
+              <div className={styles.retryRow}>
+                <Input
+                  label={t('basic_settings.session_routing_ttl_label')}
+                  hint={t('basic_settings.session_routing_ttl_hint')}
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  step={1}
+                  value={sessionConfig.ttlSeconds ?? 300}
+                  onChange={(e) => updateSessionField('ttlSeconds', Number(e.target.value))}
+                  disabled={disableControls || loading}
+                  className={styles.retryInput}
+                />
+              </div>
+
+              <div className={styles.retryRow}>
+                <Input
+                  label={t('basic_settings.session_routing_failure_threshold_label')}
+                  hint={t('basic_settings.session_routing_failure_threshold_hint')}
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  step={1}
+                  value={sessionConfig.failureThreshold ?? 3}
+                  onChange={(e) => updateSessionField('failureThreshold', Number(e.target.value))}
+                  disabled={disableControls || loading}
+                  className={styles.retryInput}
+                />
+              </div>
+
+              <div className={styles.retryRow}>
+                <Input
+                  label={t('basic_settings.session_routing_cooldown_label')}
+                  hint={t('basic_settings.session_routing_cooldown_hint')}
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  step={1}
+                  value={sessionConfig.cooldownSeconds ?? 60}
+                  onChange={(e) => updateSessionField('cooldownSeconds', Number(e.target.value))}
+                  disabled={disableControls || loading}
+                  className={styles.retryInput}
+                />
+              </div>
+            </>
+          )}
+
+          <Button
+            onClick={handleSessionRoutingUpdate}
+            loading={pending.sessionRouting}
+            disabled={disableControls || loading}
+          >
+            {t('basic_settings.session_routing_update')}
           </Button>
         </div>
       </Card>

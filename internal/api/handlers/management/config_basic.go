@@ -327,3 +327,17 @@ func (h *Handler) DeleteProxyURL(c *gin.Context) {
 	h.cfg.ProxyURL = ""
 	h.persist(c)
 }
+
+// Session Routing
+func (h *Handler) GetRoutingSession(c *gin.Context) {
+	c.JSON(200, h.cfg.Routing.Session)
+}
+func (h *Handler) PutRoutingSession(c *gin.Context) {
+	var body config.SessionRoutingConfig
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body", "message": err.Error()})
+		return
+	}
+	h.cfg.Routing.Session = body
+	h.persist(c)
+}

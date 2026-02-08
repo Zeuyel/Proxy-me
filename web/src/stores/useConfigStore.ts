@@ -44,6 +44,7 @@ const SECTION_KEYS: RawConfigSection[] = [
   'routing/strategy',
   'api-keys',
   'api-key-auth',
+  'api-key-expiry',
   'ampcode',
   'gemini-api-key',
   'codex-api-key',
@@ -82,6 +83,8 @@ const extractSectionValue = (config: Config | null, section?: RawConfigSection) 
       return config.apiKeys;
     case 'api-key-auth':
       return config.apiKeyAuth;
+    case 'api-key-expiry':
+      return config.apiKeyExpiry;
     case 'ampcode':
       return config.ampcode;
     case 'gemini-api-key':
@@ -226,6 +229,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       break;
     case 'api-key-auth':
       nextConfig.apiKeyAuth = value;
+      break;
+    case 'api-key-expiry':
+      nextConfig.apiKeyExpiry = value;
       break;
         case 'ampcode':
           nextConfig.ampcode = value;

@@ -3,7 +3,7 @@
  */
 
 import { apiClient } from './client';
-import type { Config } from '@/types';
+import type { Config, SessionRoutingConfig } from '@/types';
 import { normalizeConfigResponse } from './transformers';
 
 export const configApi = {
@@ -112,4 +112,17 @@ export const configApi = {
    * 更新路由策略
    */
   updateRoutingStrategy: (strategy: string) => apiClient.put('/routing/strategy', { value: strategy }),
+
+  /**
+   * 获取会话路由配置
+   */
+  async getRoutingSession(): Promise<SessionRoutingConfig> {
+    const data = await apiClient.get('/routing/session');
+    return data ?? { enabled: false };
+  },
+
+  /**
+   * 更新会话路由配置
+   */
+  updateRoutingSession: (session: SessionRoutingConfig) => apiClient.put('/routing/session', session),
 };

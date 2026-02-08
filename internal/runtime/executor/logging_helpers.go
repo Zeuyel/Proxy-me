@@ -19,9 +19,11 @@ import (
 )
 
 const (
-	apiAttemptsKey = "API_UPSTREAM_ATTEMPTS"
-	apiRequestKey  = "API_REQUEST"
-	apiResponseKey = "API_RESPONSE"
+	apiAttemptsKey          = "API_UPSTREAM_ATTEMPTS"
+	apiRequestKey           = "API_REQUEST"
+	apiResponseKey          = "API_RESPONSE"
+	monitorStreamErrorKey   = "monitor_stream_error"
+	monitorUpstreamErrorKey = "monitor_upstream_error"
 )
 
 // upstreamRequestLog captures the outbound upstream request details for logging.
@@ -123,12 +125,24 @@ func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 }
 
 // recordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
+// It also stores the error message in Gin context for monitor display regardless of RequestLog setting.
 func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
-	if cfg == nil || !cfg.RequestLog || err == nil {
+	if err == nil {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
+		return
+	}
+
+	// Always store error in context for monitor display (even if RequestLog is disabled)
+	errMsg := strings.TrimSpace(err.Error())
+	if errMsg != "" {
+		ginCtx.Set(monitorStreamErrorKey, errMsg)
+	}
+
+	// Only continue with detailed logging if RequestLog is enabled
+	if cfg == nil || !cfg.RequestLog {
 		return
 	}
 	attempts, attempt := ensureAttempt(ginCtx)
@@ -145,6 +159,25 @@ func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	attempt.errorWritten = true
 
 	updateAggregatedResponse(ginCtx, attempts)
+}
+
+// RecordUpstreamErrorResponse extracts and stores error message from upstream HTTP error response.
+// This is called when the upstream returns an error status code (4xx/5xx) with an error body.
+// The error message is stored in Gin context for monitor display.
+func RecordUpstreamErrorResponse(ctx context.Context, statusCode int, contentType string, body []byte) {
+	if statusCode < 400 || len(body) == 0 {
+		return
+	}
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return
+	}
+
+	errMsg := summarizeErrorBody(contentType, body)
+	if errMsg == "" {
+		return
+	}
+	ginCtx.Set(monitorUpstreamErrorKey, errMsg)
 }
 
 // appendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.

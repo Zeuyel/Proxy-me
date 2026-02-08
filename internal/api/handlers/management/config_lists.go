@@ -150,6 +150,37 @@ func (h *Handler) PutAPIKeyAuth(c *gin.Context) {
 	h.persist(c)
 }
 
+// api-key-expiry
+func (h *Handler) GetAPIKeyExpiry(c *gin.Context) {
+	mapping := h.cfg.APIKeyExpiry
+	if mapping == nil {
+		mapping = map[string]string{}
+	}
+	c.JSON(200, gin.H{"api-key-expiry": mapping})
+}
+
+func (h *Handler) PutAPIKeyExpiry(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var mapping map[string]string
+	if err = json.Unmarshal(data, &mapping); err != nil {
+		var obj struct {
+			Mapping map[string]string `json:"api-key-expiry"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		mapping = obj.Mapping
+	}
+	clean := config.NormalizeAPIKeyExpiry(mapping)
+	h.cfg.APIKeyExpiry = clean
+	h.persist(c)
+}
+
 // gemini-api-key: []GeminiKey
 func (h *Handler) GetGeminiKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"gemini-api-key": h.cfg.GeminiKey})

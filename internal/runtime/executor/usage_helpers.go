@@ -60,8 +60,48 @@ func (r *usageReporter) trackFailure(ctx context.Context, errPtr *error) {
 		return
 	}
 	if *errPtr != nil {
+		// Store error message in Gin context for monitor display
+		storeErrorMessageInContext(ctx, *errPtr)
 		r.publishFailure(ctx)
 	}
+}
+
+// storeErrorMessageInContext stores the error message in Gin context for monitor display.
+func storeErrorMessageInContext(ctx context.Context, err error) {
+	if err == nil {
+		return
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return
+	}
+	errMsg := strings.TrimSpace(err.Error())
+	if errMsg == "" {
+		return
+	}
+	// Try to extract a more readable error message from JSON
+	if extracted := extractJSONErrorFromString(errMsg); extracted != "" {
+		errMsg = extracted
+	}
+	ginCtx.Set(monitorUpstreamErrorKey, errMsg)
+}
+
+// extractJSONErrorFromString tries to extract error.message from a JSON string.
+func extractJSONErrorFromString(s string) string {
+	if !gjson.Valid(s) {
+		return ""
+	}
+	msg := gjson.Get(s, "error.message").String()
+	if msg != "" {
+		return msg
+	}
+	// Try alternative paths
+	msg = gjson.Get(s, "message").String()
+	if msg != "" {
+		return msg
+	}
+	msg = gjson.Get(s, "error").String()
+	return msg
 }
 
 func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool) {

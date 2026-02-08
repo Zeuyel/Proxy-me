@@ -64,9 +64,11 @@ const (
 )
 
 const (
-	monitorRequestTypeKey = "monitor_request_type"
-	monitorModelKey       = "monitor_model"
-	monitorSessionKey     = "monitor_session_id"
+	monitorRequestTypeKey   = "monitor_request_type"
+	monitorModelKey         = "monitor_model"
+	monitorSessionKey       = "monitor_session_id"
+	MonitorStreamErrorKey   = "monitor_stream_error"
+	MonitorUpstreamErrorKey = "monitor_upstream_error"
 )
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:\-]+$`)

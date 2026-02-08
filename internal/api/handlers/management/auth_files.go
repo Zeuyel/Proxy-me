@@ -26,6 +26,7 @@ import (
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -841,6 +842,45 @@ func (h *Handler) disableAuth(ctx context.Context, id string) {
 		auth.StatusMessage = "removed via management API"
 		auth.UpdatedAt = time.Now()
 		_, _ = h.authManager.Update(ctx, auth)
+		// Clean up proxy-routing-auth references for this auth
+		h.cleanupProxyRoutingAuth(auth.ID, auth.Index, auth.FileName)
+	}
+}
+
+// cleanupProxyRoutingAuth removes entries from ProxyRoutingAuth that reference the deleted auth.
+func (h *Handler) cleanupProxyRoutingAuth(authID, authIndex, fileName string) {
+	if h == nil || h.cfg == nil || len(h.cfg.ProxyRoutingAuth) == 0 {
+		return
+	}
+
+	// Collect keys to delete (cannot delete while iterating)
+	var keysToDelete []string
+	for key := range h.cfg.ProxyRoutingAuth {
+		if key == authID || key == authIndex || key == fileName {
+			keysToDelete = append(keysToDelete, key)
+		}
+		// Also check if key matches the base file name
+		if fileName != "" && key == filepath.Base(fileName) {
+			keysToDelete = append(keysToDelete, key)
+		}
+	}
+
+	if len(keysToDelete) == 0 {
+		return
+	}
+
+	// Delete the keys
+	for _, key := range keysToDelete {
+		delete(h.cfg.ProxyRoutingAuth, key)
+	}
+
+	// Persist the config changes directly (no gin.Context available here)
+	if h.configFilePath != "" {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+			log.WithError(err).Warn("failed to persist config after cleaning up proxy-routing-auth")
+		}
 	}
 }
 

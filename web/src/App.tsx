@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { HashRouter, Route, Routes } from 'react-router-dom';
 import { LoginPage } from '@/pages/LoginPage';
+import { ApiKeyUsagePage } from '@/pages/ApiKeyUsagePage';
 import { NotificationContainer } from '@/components/common/NotificationContainer';
 import { ConfirmationModal } from '@/components/common/ConfirmationModal';
 import { SplashScreen } from '@/components/common/SplashScreen';
@@ -65,6 +66,7 @@ function App() {
       <ConfirmationModal />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/api-key-usage" element={<ApiKeyUsagePage />} />
         <Route
           path="/*"
           element={

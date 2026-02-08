@@ -46,6 +46,12 @@ api-keys:
 #     - "another-auth-id"
 #   "your-api-key-2": []  # Optional: empty list means no accounts (deny all)
 
+# Per-client API key expiry timestamps (RFC3339)
+# If a key is not listed, it never expires.
+# api-key-expiry:
+#   "your-api-key-1": "2030-01-01T00:00:00Z"
+#   "your-api-key-2": "2030-06-01T12:30:00+08:00"
+
 # Enable debug logging
 debug: false
 

@@ -11,6 +11,22 @@ export interface QuotaExceededConfig {
   switchPreviewModel?: boolean;
 }
 
+export interface SessionRoutingConfig {
+  enabled: boolean;
+  providers?: string[];
+  ttlSeconds?: number;
+  failureThreshold?: number;
+  cooldownSeconds?: number;
+  loadWindowSeconds?: number;
+  loadWeight?: number;
+  healthWindowRequests?: number;
+  weightSuccessRate?: number;
+  weightQuota?: number;
+  penaltyStatus429?: number;
+  penaltyStatus403?: number;
+  penaltyStatus5xx?: number;
+}
+
 export interface Config {
   debug?: boolean;
   proxyUrl?: string;
@@ -23,8 +39,10 @@ export interface Config {
   wsAuth?: boolean;
   forceModelPrefix?: boolean;
   routingStrategy?: string;
+  routingSession?: SessionRoutingConfig;
   apiKeys?: string[];
   apiKeyAuth?: Record<string, string[]>;
+  apiKeyExpiry?: Record<string, string>;
   ampcode?: AmpcodeConfig;
   geminiApiKeys?: GeminiKeyConfig[];
   codexApiKeys?: ProviderKeyConfig[];
@@ -47,8 +65,10 @@ export type RawConfigSection =
   | 'ws-auth'
   | 'force-model-prefix'
   | 'routing/strategy'
+  | 'routing/session'
   | 'api-keys'
   | 'api-key-auth'
+  | 'api-key-expiry'
   | 'ampcode'
   | 'gemini-api-key'
   | 'codex-api-key'

@@ -55,6 +55,7 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (*Result, e
 	var (
 		missing bool
 		invalid bool
+		expired bool
 	)
 
 	for _, provider := range providers {
@@ -76,9 +77,16 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (*Result, e
 			invalid = true
 			continue
 		}
+		if errors.Is(err, ErrExpiredCredential) {
+			expired = true
+			continue
+		}
 		return nil, err
 	}
 
+	if expired {
+		return nil, ErrExpiredCredential
+	}
 	if invalid {
 		return nil, ErrInvalidCredential
 	}

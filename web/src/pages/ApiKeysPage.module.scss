@@ -54,3 +54,165 @@
     margin: 0;
   }
 }
+
+.metaBadges {
+  display: flex;
+  gap: $spacing-xs;
+  flex-wrap: wrap;
+  margin-top: $spacing-xs;
+}
+
+.formGroup {
+  margin-bottom: $spacing-lg;
+
+  label {
+    display: block;
+    margin-bottom: $spacing-xs;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 14px;
+  }
+
+  .hint {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: $spacing-xs;
+    line-height: 1.4;
+  }
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: $spacing-xs;
+  line-height: 1.4;
+}
+
+.scopeRow {
+  display: flex;
+  gap: $spacing-sm;
+  flex-wrap: wrap;
+  margin-top: $spacing-xs;
+}
+
+.scopeOption {
+  display: inline-flex;
+  align-items: center;
+  gap: $spacing-xs;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  background: var(--bg-secondary);
+  cursor: pointer;
+  user-select: none;
+  color: var(--text-primary);
+  font-size: 13px;
+
+  input[type='radio'] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+  }
+}
+
+.presetRow {
+  display: flex;
+  gap: $spacing-xs;
+  flex-wrap: wrap;
+  margin-top: $spacing-sm;
+}
+
+.accountSearch {
+  margin-bottom: $spacing-sm;
+}
+
+.authFilesList {
+  max-height: 360px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  background: var(--bg-secondary, #f8f9fa);
+}
+
+.emptyAuthFiles {
+  padding: $spacing-xl;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.authFileItem {
+  display: flex;
+  align-items: flex-start;
+  padding: 12px $spacing-md;
+  border-bottom: 1px solid var(--border-color);
+  transition: background $transition-fast;
+
+  &:last-child {
+    border-bottom: none;
+  }
+
+  &:hover {
+    background: var(--hover-bg, rgba(0, 0, 0, 0.02));
+  }
+
+  input[type='checkbox'] {
+    width: 18px;
+    height: 18px;
+    margin: 2px 12px 0 0;
+    cursor: pointer;
+  }
+}
+
+.authFileLabel {
+  flex: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  min-width: 0;
+}
+
+.authFileMeta {
+  min-width: 0;
+}
+
+.authFileName {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 14px;
+  @include text-ellipsis;
+}
+
+.authFileSub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.authFileType {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--badge-bg, #e9ecef);
+  padding: 3px 8px;
+  border-radius: $radius-sm;
+  font-family: $font-mono;
+}
+
+.authFileEmail {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 3px 8px;
+  border-radius: $radius-sm;
+  background: var(--bg-primary, white);
+  border: 1px solid var(--border-color);
+  font-family: $font-mono;
+}
+
+.modalFooter {
+  display: flex;
+  gap: $spacing-sm;
+  justify-content: flex-end;
+  margin-top: $spacing-xl;
+}

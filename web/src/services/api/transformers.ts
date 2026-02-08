@@ -266,6 +266,25 @@ const normalizeApiKeyAuth = (payload: any): Record<string, string[]> | undefined
   return Object.keys(result).length ? result : {};
 };
 
+const normalizeApiKeyExpiry = (payload: any): Record<string, string> | undefined => {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const record = payload as Record<string, unknown>;
+  const source = record['api-key-expiry'] ?? record.apiKeyExpiry ?? payload;
+  if (!source || typeof source !== 'object') return undefined;
+
+  const result: Record<string, string> = {};
+  Object.entries(source as Record<string, unknown>).forEach(([rawKey, rawValue]) => {
+    const key = String(rawKey ?? '').trim();
+    if (!key) return;
+    if (rawValue == null) return;
+    const value = String(rawValue ?? '').trim();
+    if (!value) return;
+    result[key] = value;
+  });
+
+  return Object.keys(result).length ? result : {};
+};
+
 /**
  * 规范化 /config 返回值
  */
@@ -303,6 +322,10 @@ export const normalizeConfigResponse = (raw: any): Config => {
   const apiKeyAuth = normalizeApiKeyAuth(raw);
   if (apiKeyAuth) {
     config.apiKeyAuth = apiKeyAuth;
+  }
+  const apiKeyExpiry = normalizeApiKeyExpiry(raw);
+  if (apiKeyExpiry) {
+    config.apiKeyExpiry = apiKeyExpiry;
   }
 
   const geminiList = raw['gemini-api-key'] ?? raw.geminiApiKey ?? raw.geminiApiKeys;

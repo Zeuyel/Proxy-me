@@ -337,6 +337,21 @@ func (w *ResponseWriterWrapper) recordRequestLog(c *gin.Context, statusCode int,
 	if len(apiErrors) > 0 && apiErrors[0] != nil && apiErrors[0].Error != nil {
 		errMessage = strings.TrimSpace(apiErrors[0].Error.Error())
 	}
+
+	// Try to get stream error from context (set by executor layer)
+	if errMessage == "" {
+		if streamErr := getStringFromContext(c, "monitor_stream_error"); streamErr != "" {
+			errMessage = streamErr
+		}
+	}
+
+	// Try to get upstream error from context
+	if errMessage == "" {
+		if upstreamErr := getStringFromContext(c, "monitor_upstream_error"); upstreamErr != "" {
+			errMessage = upstreamErr
+		}
+	}
+
 	if errMessage == "" && statusCode >= http.StatusBadRequest {
 		errMessage = summarizeErrorMessage(responseBody)
 	}
