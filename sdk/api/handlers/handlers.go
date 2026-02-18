@@ -73,6 +73,10 @@ const (
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:\-]+$`)
 
+type pinnedAuthContextKey struct{}
+type selectedAuthCallbackContextKey struct{}
+type executionSessionContextKey struct{}
+
 func clientAPIKeyFromGin(c *gin.Context) string {
 	if c == nil {
 		return ""
@@ -90,6 +94,41 @@ func clientAPIKeyFromGin(c *gin.Context) string {
 		}
 	}
 	return ""
+}
+
+// WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
+func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, pinnedAuthContextKey{}, authID)
+}
+
+// WithSelectedAuthIDCallback returns a child context that receives the selected auth ID.
+func WithSelectedAuthIDCallback(ctx context.Context, callback func(string)) context.Context {
+	if callback == nil {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, selectedAuthCallbackContextKey{}, callback)
+}
+
+// WithExecutionSessionID returns a child context tagged with a long-lived execution session ID.
+func WithExecutionSessionID(ctx context.Context, sessionID string) context.Context {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, executionSessionContextKey{}, sessionID)
 }
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
@@ -197,6 +236,15 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	meta := map[string]any{idempotencyKeyMetadataKey: key}
 	if clientKey != "" {
 		meta[coreexecutor.ClientAPIKeyMetadataKey] = clientKey
+	}
+	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
+		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
+	}
+	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
+		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
+	}
+	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
+		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
 	}
 	return meta
 }
@@ -318,6 +366,47 @@ func mergeMetadata(base, overlay map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+func pinnedAuthIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(pinnedAuthContextKey{})
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
+	}
+}
+
+func selectedAuthIDCallbackFromContext(ctx context.Context) func(string) {
+	if ctx == nil {
+		return nil
+	}
+	raw := ctx.Value(selectedAuthCallbackContextKey{})
+	if callback, ok := raw.(func(string)); ok && callback != nil {
+		return callback
+	}
+	return nil
+}
+
+func executionSessionIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(executionSessionContextKey{})
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
+	}
 }
 
 // BaseAPIHandler contains the handlers for API endpoints.
@@ -866,6 +955,26 @@ func cloneMetadata(src map[string]any) map[string]any {
 		dst[k] = v
 	}
 	return dst
+}
+
+func cloneHeader(src http.Header) http.Header {
+	if src == nil {
+		return nil
+	}
+	dst := make(http.Header, len(src))
+	for key, values := range src {
+		dst[key] = append([]string(nil), values...)
+	}
+	return dst
+}
+
+func replaceHeader(dst http.Header, src http.Header) {
+	for key := range dst {
+		delete(dst, key)
+	}
+	for key, values := range src {
+		dst[key] = append([]string(nil), values...)
+	}
 }
 
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
