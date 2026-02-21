@@ -31,6 +31,9 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "temperature")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "top_p")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "service_tier")
+	rawJSON, _ = sjson.DeleteBytes(rawJSON, "truncation")
+	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
+	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
 
 	originalInstructions := ""
 	originalInstructionsText := ""
@@ -116,6 +119,43 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON, _ = sjson.SetBytes(rawJSON, "instructions", instructions)
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
 
+	return rawJSON
+}
+
+// applyResponsesCompactionCompatibility handles OpenAI Responses context_management.compaction
+// for Codex upstream compatibility.
+//
+// Codex /responses currently rejects context_management with:
+// {"detail":"Unsupported parameter: context_management"}.
+//
+// Compatibility strategy:
+// 1) Remove context_management before forwarding to Codex upstream.
+// 2) Remove truncation as Codex upstream currently rejects it as unsupported.
+func applyResponsesCompactionCompatibility(rawJSON []byte) []byte {
+	contextManagement := gjson.GetBytes(rawJSON, "context_management")
+	if !contextManagement.Exists() {
+		return rawJSON
+	}
+
+	hasCompactionRule := false
+	switch {
+	case contextManagement.IsArray():
+		for _, item := range contextManagement.Array() {
+			if strings.EqualFold(item.Get("type").String(), "compaction") {
+				hasCompactionRule = true
+				break
+			}
+		}
+	case contextManagement.IsObject():
+		hasCompactionRule = strings.EqualFold(contextManagement.Get("type").String(), "compaction")
+	}
+
+	if hasCompactionRule {
+		// no-op marker: compaction hint detected and consumed for compatibility.
+	}
+
+	rawJSON, _ = sjson.DeleteBytes(rawJSON, "context_management")
+	rawJSON, _ = sjson.DeleteBytes(rawJSON, "truncation")
 	return rawJSON
 }
 
