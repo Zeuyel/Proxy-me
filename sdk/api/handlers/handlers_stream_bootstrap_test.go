@@ -122,6 +122,82 @@ func (e *payloadThenErrorStreamExecutor) Calls() int {
 	return e.calls
 }
 
+type authAwareStreamExecutor struct {
+	mu      sync.Mutex
+	calls   int
+	authIDs []string
+}
+
+func (e *authAwareStreamExecutor) Identifier() string { return "codex" }
+
+func (e *authAwareStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *authAwareStreamExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (<-chan coreexecutor.StreamChunk, error) {
+	_ = ctx
+	_ = req
+	_ = opts
+	ch := make(chan coreexecutor.StreamChunk, 1)
+
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+
+	e.mu.Lock()
+	e.calls++
+	e.authIDs = append(e.authIDs, authID)
+	e.mu.Unlock()
+
+	if authID == "auth1" {
+		ch <- coreexecutor.StreamChunk{
+			Err: &coreauth.Error{
+				Code:       "unauthorized",
+				Message:    "unauthorized",
+				Retryable:  false,
+				HTTPStatus: http.StatusUnauthorized,
+			},
+		}
+		close(ch)
+		return ch, nil
+	}
+
+	ch <- coreexecutor.StreamChunk{Payload: []byte("ok")}
+	close(ch)
+	return ch, nil
+}
+
+func (e *authAwareStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *authAwareStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *authAwareStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{
+		Code:       "not_implemented",
+		Message:    "HttpRequest not implemented",
+		HTTPStatus: http.StatusNotImplemented,
+	}
+}
+
+func (e *authAwareStreamExecutor) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+func (e *authAwareStreamExecutor) AuthIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.authIDs))
+	copy(out, e.authIDs)
+	return out
+}
+
 func TestExecuteStreamWithAuthManager_RetriesBeforeFirstByte(t *testing.T) {
 	executor := &failOnceStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -291,7 +367,7 @@ func TestExecuteStreamWithAuthManager_PinnedAuthKeepsSameUpstream(t *testing.T) 
 		},
 	}, manager)
 	ctx := WithPinnedAuthID(context.Background(), "auth1")
-	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	dataChan, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
 	if dataChan == nil || errChan == nil {
 		t.Fatalf("expected non-nil channels")
 	}
@@ -355,7 +431,7 @@ func TestExecuteStreamWithAuthManager_SelectedAuthCallbackReceivesAuthID(t *test
 	ctx := WithSelectedAuthIDCallback(context.Background(), func(authID string) {
 		selectedAuthID = authID
 	})
-	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	dataChan, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
 	if dataChan == nil || errChan == nil {
 		t.Fatalf("expected non-nil channels")
 	}
