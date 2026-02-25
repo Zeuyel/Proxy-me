@@ -204,7 +204,32 @@ const fetchAntigravityQuota = async (
 const buildCodexQuotaWindows = (payload: CodexUsagePayload, t: TFunction): CodexQuotaWindow[] => {
   const rateLimit = payload.rate_limit ?? payload.rateLimit ?? undefined;
   const codeReviewLimit = payload.code_review_rate_limit ?? payload.codeReviewRateLimit ?? undefined;
+  const planType = normalizePlanType(payload.plan_type ?? payload.planType);
+  const primaryWindow = rateLimit?.primary_window ?? rateLimit?.primaryWindow;
+  const secondaryWindow = rateLimit?.secondary_window ?? rateLimit?.secondaryWindow;
+  const hasSecondaryWindow = Boolean(secondaryWindow);
   const windows: CodexQuotaWindow[] = [];
+
+  const resolveWindowLabelKey = (
+    id: string,
+    defaultLabelKey: string,
+    window?: CodexUsageWindow | null
+  ): string => {
+    if (id !== 'primary' || !window) return defaultLabelKey;
+
+    const limitWindowSeconds = normalizeNumberValue(
+      window.limit_window_seconds ?? window.limitWindowSeconds
+    );
+    if (limitWindowSeconds !== null && limitWindowSeconds >= 24 * 60 * 60) {
+      return 'codex_quota.secondary_window';
+    }
+
+    if (limitWindowSeconds === null && planType === 'free' && !hasSecondaryWindow) {
+      return 'codex_quota.secondary_window';
+    }
+
+    return defaultLabelKey;
+  };
 
   const addWindow = (
     id: string,
@@ -214,14 +239,15 @@ const buildCodexQuotaWindows = (payload: CodexUsagePayload, t: TFunction): Codex
     allowed?: boolean
   ) => {
     if (!window) return;
+    const resolvedLabelKey = resolveWindowLabelKey(id, labelKey, window);
     const resetLabel = formatCodexResetLabel(window);
     const usedPercentRaw = normalizeNumberValue(window.used_percent ?? window.usedPercent);
     const isLimitReached = Boolean(limitReached) || allowed === false;
     const usedPercent = usedPercentRaw ?? (isLimitReached && resetLabel !== '-' ? 100 : null);
     windows.push({
       id,
-      label: t(labelKey),
-      labelKey,
+      label: t(resolvedLabelKey),
+      labelKey: resolvedLabelKey,
       usedPercent,
       resetLabel
     });
@@ -230,14 +256,14 @@ const buildCodexQuotaWindows = (payload: CodexUsagePayload, t: TFunction): Codex
   addWindow(
     'primary',
     'codex_quota.primary_window',
-    rateLimit?.primary_window ?? rateLimit?.primaryWindow,
+    primaryWindow,
     rateLimit?.limit_reached ?? rateLimit?.limitReached,
     rateLimit?.allowed
   );
   addWindow(
     'secondary',
     'codex_quota.secondary_window',
-    rateLimit?.secondary_window ?? rateLimit?.secondaryWindow,
+    secondaryWindow,
     rateLimit?.limit_reached ?? rateLimit?.limitReached,
     rateLimit?.allowed
   );
@@ -416,7 +442,6 @@ const renderCodexItems = (
   };
 
   const planLabel = getPlanLabel(planType);
-  const isFreePlan = normalizePlanType(planType) === 'free';
   const nodes: ReactNode[] = [];
 
   if (planLabel) {
@@ -428,17 +453,6 @@ const renderCodexItems = (
         h('span', { className: styleMap.codexPlanValue }, planLabel)
       )
     );
-  }
-
-  if (isFreePlan) {
-    nodes.push(
-      h(
-        'div',
-        { key: 'warning', className: styleMap.quotaWarning },
-        t('codex_quota.no_access')
-      )
-    );
-    return h(Fragment, null, ...nodes);
   }
 
   if (windows.length === 0) {
