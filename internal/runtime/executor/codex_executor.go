@@ -662,8 +662,20 @@ func codexQuotaRecoverAt(payload []byte, now time.Time) (time.Time, string, bool
 		if allowed := rateLimit.Get("allowed"); allowed.Exists() && !allowed.Bool() {
 			parentLimited = true
 		}
-		appendCodexWindowCandidate(&candidates, rateLimit.Get("primary_window"), parentLimited, reasonPrimary, now)
-		appendCodexWindowCandidate(&candidates, rateLimit.Get("primaryWindow"), parentLimited, reasonPrimary, now)
+		appendCodexWindowCandidate(
+			&candidates,
+			rateLimit.Get("primary_window"),
+			parentLimited,
+			resolveCodexWindowReason(rateLimit.Get("primary_window"), reasonPrimary, reasonSecondary),
+			now,
+		)
+		appendCodexWindowCandidate(
+			&candidates,
+			rateLimit.Get("primaryWindow"),
+			parentLimited,
+			resolveCodexWindowReason(rateLimit.Get("primaryWindow"), reasonPrimary, reasonSecondary),
+			now,
+		)
 		appendCodexWindowCandidate(&candidates, rateLimit.Get("secondary_window"), parentLimited, reasonSecondary, now)
 		appendCodexWindowCandidate(&candidates, rateLimit.Get("secondaryWindow"), parentLimited, reasonSecondary, now)
 	}
@@ -683,6 +695,28 @@ func codexQuotaRecoverAt(payload []byte, now time.Time) (time.Time, string, bool
 		}
 	}
 	return earliest.resetAt, earliest.reason, true
+}
+
+func resolveCodexWindowReason(window gjson.Result, reasonPrimary, reasonSecondary string) string {
+	if reasonPrimary == reasonSecondary {
+		return reasonPrimary
+	}
+	if !window.Exists() || window.Type == gjson.Null {
+		return reasonPrimary
+	}
+	if limitWindowSeconds, ok := gjsonToFloat(window.Get("limit_window_seconds")); ok && limitWindowSeconds >= 24*60*60 {
+		return reasonSecondary
+	}
+	if limitWindowSeconds, ok := gjsonToFloat(window.Get("limitWindowSeconds")); ok && limitWindowSeconds >= 24*60*60 {
+		return reasonSecondary
+	}
+	if resetAfterSeconds, ok := gjsonToFloat(window.Get("reset_after_seconds")); ok && resetAfterSeconds >= 24*60*60 {
+		return reasonSecondary
+	}
+	if resetAfterSeconds, ok := gjsonToFloat(window.Get("resetAfterSeconds")); ok && resetAfterSeconds >= 24*60*60 {
+		return reasonSecondary
+	}
+	return reasonPrimary
 }
 
 func appendCodexWindowCandidate(candidates *[]struct {

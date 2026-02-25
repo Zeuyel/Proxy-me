@@ -486,11 +486,18 @@ export function AuthFilesPage() {
     const cooldownUntil = parseTimestampValue(cooldownUntilRaw);
     const untilText = cooldownUntil ? cooldownUntil.toLocaleString() : null;
     const reasonRaw = String(item['disabled_reason'] ?? item.disabledReason ?? '').trim().toLowerCase();
+    const msUntilRecover = cooldownUntil ? cooldownUntil.getTime() - Date.now() : null;
+    const likelyWeeklyWindow = msUntilRecover !== null && msUntilRecover >= 24 * 60 * 60 * 1000;
 
     if (!cooldownActive || reasonRaw === 'manual' || item.disabled === true) {
       return t('auth_files.disabled_reason_manual');
     }
     if (reasonRaw === 'codex_5h_limit') {
+      if (likelyWeeklyWindow) {
+        return untilText
+          ? t('auth_files.disabled_reason_cooldown_weekly_until', { time: untilText })
+          : t('auth_files.disabled_reason_cooldown_weekly');
+      }
       return untilText
         ? t('auth_files.disabled_reason_cooldown_5h_until', { time: untilText })
         : t('auth_files.disabled_reason_cooldown_5h');
@@ -511,17 +518,24 @@ export function AuthFilesPage() {
   };
 
   // 加载文件列表
-  const loadFiles = useCallback(async () => {
-    setLoading(true);
-    setError('');
+  const loadFiles = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = options?.silent === true;
+    if (!silent) {
+      setLoading(true);
+      setError('');
+    }
     try {
       const data = await authFilesApi.list();
       setFiles(data?.files || []);
     } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : t('notification.refresh_failed');
-      setError(errorMessage);
+      if (!silent) {
+        const errorMessage = err instanceof Error ? err.message : t('notification.refresh_failed');
+        setError(errorMessage);
+      }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }, [t]);
 
@@ -627,6 +641,12 @@ export function AuthFilesPage() {
     loadModelMappings();
     loadApiKeyAuthMapping();
   }, [loadFiles, loadKeyStats, loadExcluded, loadModelMappings, loadApiKeyAuthMapping]);
+
+  // Keep auth cooldown/disabled status in sync with runtime state.
+  useInterval(() => {
+    if (connectionStatus !== 'connected') return;
+    void loadFiles({ silent: true });
+  }, 15_000);
 
   // 定时刷新状态数据（每240秒）
   useInterval(loadKeyStats, 240_000);
@@ -1645,7 +1665,11 @@ export function AuthFilesPage() {
 
         {disabledReason && (
           <div className={styles.disabledInfoRow}>
-            <span className={styles.disabledBadge}>{t('common.disabled')}</span>
+            <span className={styles.disabledBadge}>
+              {cooldownActive && item.disabled !== true
+                ? t('auth_files.cooldown_badge')
+                : t('common.disabled')}
+            </span>
             <span className={styles.disabledReason}>{disabledReason}</span>
           </div>
         )}

@@ -43,7 +43,13 @@
     "custom_headers_key_placeholder": "Header name, e.g. X-Custom-Header",
     "custom_headers_value_placeholder": "Header value",
     "model_name_placeholder": "Model name, e.g. claude-3-5-sonnet-20241022",
-    "model_alias_placeholder": "Model alias (optional)"
+    "model_alias_placeholder": "Model alias (optional)",
+    "refresh_all": "Refresh All",
+    "saving": "Saving...",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "confirmDelete": "Confirm Deletion",
+    "cannotUndo": "This action cannot be undone"
   },
   "title": {
     "main": "CLI Proxy API Management Center",
@@ -489,6 +495,7 @@
     "models_excluded_badge": "Excluded",
     "models_excluded_hint": "This model is excluded by OAuth",
     "status_toggle_label": "Enabled",
+    "cooldown_badge": "Cooling down",
     "status_enabled_success": "\"{{name}}\" enabled",
     "status_disabled_success": "\"{{name}}\" disabled",
     "disabled_reason_manual": "Manually disabled",
