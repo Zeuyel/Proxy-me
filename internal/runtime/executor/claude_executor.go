@@ -137,8 +137,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 
-	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
-	url = resolveReverseProxyURLForAuth(e.cfg, auth, e.Identifier(), url)
+	originalURL := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	proxyRoute := resolveReverseProxyRouteForAuth(e.cfg, auth, e.Identifier(), originalURL)
+	url := proxyRoute.URL
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return resp, err
@@ -173,11 +174,52 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
+		if proxyRoute.Proxied && shouldBanReverseProxyOnError(httpResp.StatusCode, string(b)) {
+			banReverseProxyTemporarily(proxyRoute.ProxyID, e.Identifier(), httpResp.StatusCode, string(b))
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("response body close error: %v", errClose)
+			}
+			fallbackURL := originalURL
+			logWithRequestID(ctx).Warnf("claude executor: reverse proxy failed, retrying direct upstream: %s", fallbackURL)
+			httpReq, err = http.NewRequestWithContext(ctx, http.MethodPost, fallbackURL, bytes.NewReader(bodyForUpstream))
+			if err != nil {
+				return resp, err
+			}
+			applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas)
+			recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+				URL:       fallbackURL,
+				Method:    http.MethodPost,
+				Headers:   httpReq.Header.Clone(),
+				Body:      bodyForUpstream,
+				Provider:  e.Identifier(),
+				AuthID:    authID,
+				AuthLabel: authLabel,
+				AuthType:  authType,
+				AuthValue: authValue,
+			})
+			httpResp, err = httpClient.Do(httpReq)
+			if err != nil {
+				recordAPIResponseError(ctx, e.cfg, err)
+				return resp, err
+			}
+			recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+				b, _ := io.ReadAll(httpResp.Body)
+				appendAPIResponseChunk(ctx, e.cfg, b)
+				logWithRequestID(ctx).Debugf("retry request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("response body close error: %v", errClose)
+				}
+				err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+				return resp, err
+			}
+		} else {
+			err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("response body close error: %v", errClose)
+			}
+			return resp, err
 		}
-		return resp, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 	if err != nil {
@@ -278,8 +320,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 
-	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
-	url = resolveReverseProxyURLForAuth(e.cfg, auth, e.Identifier(), url)
+	originalURL := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	proxyRoute := resolveReverseProxyRouteForAuth(e.cfg, auth, e.Identifier(), originalURL)
+	url := proxyRoute.URL
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return nil, err
@@ -317,8 +360,46 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return nil, err
+		if proxyRoute.Proxied && shouldBanReverseProxyOnError(httpResp.StatusCode, string(b)) {
+			banReverseProxyTemporarily(proxyRoute.ProxyID, e.Identifier(), httpResp.StatusCode, string(b))
+			fallbackURL := originalURL
+			logWithRequestID(ctx).Warnf("claude executor: reverse proxy failed, retrying direct upstream: %s", fallbackURL)
+			httpReq, err = http.NewRequestWithContext(ctx, http.MethodPost, fallbackURL, bytes.NewReader(bodyForUpstream))
+			if err != nil {
+				return nil, err
+			}
+			applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas)
+			recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+				URL:       fallbackURL,
+				Method:    http.MethodPost,
+				Headers:   httpReq.Header.Clone(),
+				Body:      bodyForUpstream,
+				Provider:  e.Identifier(),
+				AuthID:    authID,
+				AuthLabel: authLabel,
+				AuthType:  authType,
+				AuthValue: authValue,
+			})
+			httpResp, err = httpClient.Do(httpReq)
+			if err != nil {
+				recordAPIResponseError(ctx, e.cfg, err)
+				return nil, err
+			}
+			recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+				b, _ := io.ReadAll(httpResp.Body)
+				appendAPIResponseChunk(ctx, e.cfg, b)
+				logWithRequestID(ctx).Debugf("retry request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("response body close error: %v", errClose)
+				}
+				err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+				return nil, err
+			}
+		} else {
+			err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+			return nil, err
+		}
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 	if err != nil {

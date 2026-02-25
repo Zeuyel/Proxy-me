@@ -3,12 +3,20 @@ package executor
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+func resetReverseProxyBanState() {
+	reverseProxyBanState.mu.Lock()
+	reverseProxyBanState.bannedTill = make(map[string]time.Time)
+	reverseProxyBanState.mu.Unlock()
+}
+
 func TestResolveReverseProxyURLWithID_UsesWorkerBridge(t *testing.T) {
+	resetReverseProxyBanState()
 	cfg := &config.Config{
 		ReverseProxyWorkerURL: "https://cpa-deno-bridge.mengcenfay.workers.dev",
 		ReverseProxies: []config.ReverseProxy{
@@ -34,6 +42,7 @@ func TestResolveReverseProxyURLWithID_UsesWorkerBridge(t *testing.T) {
 }
 
 func TestResolveReverseProxyURLWithID_FallsBackToClassicRewriteWithoutWorker(t *testing.T) {
+	resetReverseProxyBanState()
 	cfg := &config.Config{
 		ReverseProxies: []config.ReverseProxy{
 			{
@@ -58,6 +67,7 @@ func TestResolveReverseProxyURLWithID_FallsBackToClassicRewriteWithoutWorker(t *
 }
 
 func TestResolveReverseProxyURLWithID_AvoidsWorkerRecursion(t *testing.T) {
+	resetReverseProxyBanState()
 	cfg := &config.Config{
 		ReverseProxyWorkerURL: "https://cpa-deno-bridge.mengcenfay.workers.dev",
 		ReverseProxies: []config.ReverseProxy{
@@ -83,6 +93,7 @@ func TestResolveReverseProxyURLWithID_AvoidsWorkerRecursion(t *testing.T) {
 }
 
 func TestApplyReverseProxyHeaders_InjectsConfiguredHeaders(t *testing.T) {
+	resetReverseProxyBanState()
 	cfg := &config.Config{
 		ProxyRouting: config.ProxyRouting{Codex: "deno-1"},
 		ReverseProxies: []config.ReverseProxy{
@@ -110,6 +121,7 @@ func TestApplyReverseProxyHeaders_InjectsConfiguredHeaders(t *testing.T) {
 }
 
 func TestApplyReverseProxyHeaders_DoesNotOverrideExistingHeaders(t *testing.T) {
+	resetReverseProxyBanState()
 	cfg := &config.Config{
 		ProxyRouting: config.ProxyRouting{Codex: "deno-1"},
 		ReverseProxies: []config.ReverseProxy{
@@ -138,6 +150,7 @@ func TestApplyReverseProxyHeaders_DoesNotOverrideExistingHeaders(t *testing.T) {
 }
 
 func TestApplyReverseProxyHeaders_PrefersAuthRoutingOverProviderRouting(t *testing.T) {
+	resetReverseProxyBanState()
 	cfg := &config.Config{
 		ProxyRouting: config.ProxyRouting{Codex: "deno-provider"},
 		ProxyRoutingAuth: map[string]string{
@@ -174,5 +187,62 @@ func TestApplyReverseProxyHeaders_PrefersAuthRoutingOverProviderRouting(t *testi
 	applyReverseProxyHeaders(req, cfg, auth, "codex")
 	if got := req.Header.Get("x-worker-token"); got != "auth-token" {
 		t.Fatalf("expected auth-routed token, got %q", got)
+	}
+}
+
+func TestResolveReverseProxyRouteForAuth_SkipsTemporarilyBannedProxy(t *testing.T) {
+	resetReverseProxyBanState()
+	cfg := &config.Config{
+		ProxyRouting: config.ProxyRouting{Codex: "deno-1"},
+		ReverseProxies: []config.ReverseProxy{
+			{
+				ID:      "deno-1",
+				Name:    "deno-1",
+				BaseURL: "https://funny-starfish-28.lauracadano-max.deno.net",
+				Enabled: true,
+			},
+		},
+	}
+	originalURL := "https://chatgpt.com/backend-api/codex/responses"
+	banReverseProxyTemporarily("deno-1", "codex", http.StatusNotFound, "status 404")
+
+	route := resolveReverseProxyRouteForAuth(cfg, nil, "codex", originalURL)
+	if route.URL != originalURL {
+		t.Fatalf("expected direct URL when banned, got %q", route.URL)
+	}
+	if route.ProxyID != "deno-1" {
+		t.Fatalf("unexpected proxy id, got %q", route.ProxyID)
+	}
+	if route.Proxied {
+		t.Fatalf("expected proxied=false when proxy is banned")
+	}
+}
+
+func TestIsReverseProxyTemporarilyBanned_ExpiresAutomatically(t *testing.T) {
+	resetReverseProxyBanState()
+	reverseProxyBanState.mu.Lock()
+	reverseProxyBanState.bannedTill["deno-1"] = time.Now().Add(-time.Second)
+	reverseProxyBanState.mu.Unlock()
+
+	if isReverseProxyTemporarilyBanned("deno-1") {
+		t.Fatalf("expected expired ban to be treated as inactive")
+	}
+	reverseProxyBanState.mu.Lock()
+	_, ok := reverseProxyBanState.bannedTill["deno-1"]
+	reverseProxyBanState.mu.Unlock()
+	if ok {
+		t.Fatalf("expected expired ban entry to be cleaned up")
+	}
+}
+
+func TestShouldBanReverseProxyOnError(t *testing.T) {
+	if !shouldBanReverseProxyOnError(http.StatusNotFound, "status 404") {
+		t.Fatalf("expected 404 to trigger proxy ban")
+	}
+	if !shouldBanReverseProxyOnError(http.StatusOK, "请求详情") {
+		t.Fatalf("expected request-detail marker to trigger proxy ban")
+	}
+	if shouldBanReverseProxyOnError(http.StatusBadRequest, "invalid model") {
+		t.Fatalf("did not expect generic 400 to trigger proxy ban")
 	}
 }

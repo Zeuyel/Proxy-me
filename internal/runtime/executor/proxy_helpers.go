@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -14,6 +15,21 @@ import (
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/proxy"
 )
+
+const reverseProxyBanTTL = 5 * time.Minute
+
+type reverseProxyResolution struct {
+	URL     string
+	ProxyID string
+	Proxied bool
+}
+
+var reverseProxyBanState = struct {
+	mu         sync.Mutex
+	bannedTill map[string]time.Time
+}{
+	bannedTill: make(map[string]time.Time),
+}
 
 // newProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
@@ -133,18 +149,44 @@ func buildProxyTransport(proxyURL string) *http.Transport {
 // Returns:
 //   - string: The resolved URL (either proxied or original)
 func resolveReverseProxyURL(cfg *config.Config, provider string, originalURL string) string {
-	proxyID := resolveProxyIDForProvider(cfg, provider)
-	return resolveReverseProxyURLWithID(cfg, proxyID, provider, originalURL)
+	return resolveReverseProxyRoute(cfg, provider, originalURL).URL
 }
 
 // resolveReverseProxyURLForAuth resolves the reverse proxy URL using per-auth routing when available.
 // It falls back to provider routing when no auth-specific proxy is configured.
 func resolveReverseProxyURLForAuth(cfg *config.Config, auth *cliproxyauth.Auth, provider string, originalURL string) string {
+	return resolveReverseProxyRouteForAuth(cfg, auth, provider, originalURL).URL
+}
+
+func resolveReverseProxyRoute(cfg *config.Config, provider string, originalURL string) reverseProxyResolution {
+	proxyID := resolveProxyIDForProvider(cfg, provider)
+	return resolveReverseProxyRouteWithID(cfg, proxyID, provider, originalURL)
+}
+
+func resolveReverseProxyRouteForAuth(cfg *config.Config, auth *cliproxyauth.Auth, provider string, originalURL string) reverseProxyResolution {
 	proxyID := resolveProxyIDForAuth(cfg, auth)
 	if proxyID == "" {
 		proxyID = resolveProxyIDForProvider(cfg, provider)
 	}
-	return resolveReverseProxyURLWithID(cfg, proxyID, provider, originalURL)
+	return resolveReverseProxyRouteWithID(cfg, proxyID, provider, originalURL)
+}
+
+func resolveReverseProxyRouteWithID(cfg *config.Config, proxyID string, provider string, originalURL string) reverseProxyResolution {
+	result := reverseProxyResolution{
+		URL:     originalURL,
+		ProxyID: strings.TrimSpace(proxyID),
+		Proxied: false,
+	}
+	if result.ProxyID == "" {
+		return result
+	}
+	if isReverseProxyTemporarilyBanned(result.ProxyID) {
+		log.Warnf("reverse proxy %s temporarily banned, fallback to direct for provider %s", result.ProxyID, provider)
+		return result
+	}
+	result.URL = resolveReverseProxyURLWithID(cfg, result.ProxyID, provider, originalURL)
+	result.Proxied = result.URL != originalURL
+	return result
 }
 
 func resolveProxyIDForProvider(cfg *config.Config, provider string) string {
@@ -295,6 +337,9 @@ func applyReverseProxyHeaders(req *http.Request, cfg *config.Config, auth *clipr
 	if proxyID == "" {
 		return
 	}
+	if isReverseProxyTemporarilyBanned(proxyID) {
+		return
+	}
 
 	proxyConfig := findReverseProxyByID(cfg, proxyID)
 	if proxyConfig == nil || len(proxyConfig.Headers) == 0 {
@@ -312,6 +357,81 @@ func applyReverseProxyHeaders(req *http.Request, cfg *config.Config, auth *clipr
 		}
 		req.Header.Set(k, v)
 	}
+}
+
+func shouldBanReverseProxyOnError(statusCode int, errMsg string) bool {
+	switch statusCode {
+	case http.StatusNotFound, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	case 520, 521, 522, 523, 524:
+		return true
+	}
+
+	msg := strings.ToLower(strings.TrimSpace(errMsg))
+	if msg == "" {
+		return false
+	}
+
+	if strings.Contains(msg, "请求详情") {
+		return true
+	}
+
+	patterns := []string{
+		"request detail",
+		"status 404",
+		"\"status\":404",
+		"/v1/v1/messages",
+	}
+	for _, p := range patterns {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func banReverseProxyTemporarily(proxyID string, provider string, statusCode int, errMsg string) {
+	id := strings.TrimSpace(proxyID)
+	if id == "" {
+		return
+	}
+	until := time.Now().Add(reverseProxyBanTTL)
+	reverseProxyBanState.mu.Lock()
+	if current, ok := reverseProxyBanState.bannedTill[id]; ok && current.After(until) {
+		until = current
+	}
+	reverseProxyBanState.bannedTill[id] = until
+	reverseProxyBanState.mu.Unlock()
+	log.Warnf("temporarily banning reverse proxy %s for provider %s until %s due to upstream error status=%d detail=%s", id, provider, until.Format(time.RFC3339), statusCode, shortenBanReason(errMsg))
+}
+
+func isReverseProxyTemporarilyBanned(proxyID string) bool {
+	id := strings.TrimSpace(proxyID)
+	if id == "" {
+		return false
+	}
+	now := time.Now()
+	reverseProxyBanState.mu.Lock()
+	defer reverseProxyBanState.mu.Unlock()
+	until, ok := reverseProxyBanState.bannedTill[id]
+	if !ok {
+		return false
+	}
+	if now.After(until) {
+		delete(reverseProxyBanState.bannedTill, id)
+		return false
+	}
+	return true
+}
+
+func shortenBanReason(msg string) string {
+	trimmed := strings.TrimSpace(msg)
+	const maxLen = 256
+	if len(trimmed) <= maxLen {
+		return trimmed
+	}
+	return trimmed[:maxLen] + "..."
 }
 
 func buildReverseProxyWorkerURL(cfg *config.Config, proxyBaseURL string, prefix string, path string, rawQuery string) string {
