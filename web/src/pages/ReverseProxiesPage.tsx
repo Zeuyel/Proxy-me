@@ -359,18 +359,14 @@ export function ReverseProxiesPage() {
           mode: 'no-cors', // 避免 CORS 问题
         });
         testMethod = 'HEAD';
-      } catch (headErr) {
+      } catch {
         // 方法2: 如果 HEAD 失败，尝试 GET 请求
-        try {
-          await fetch(proxy['base-url'], {
-            method: 'GET',
-            signal: controller.signal,
-            mode: 'no-cors',
-          });
-          testMethod = 'GET';
-        } catch (getErr) {
-          throw getErr;
-        }
+        await fetch(proxy['base-url'], {
+          method: 'GET',
+          signal: controller.signal,
+          mode: 'no-cors',
+        });
+        testMethod = 'GET';
       }
 
       clearTimeout(timeoutId);
