@@ -386,13 +386,15 @@ func (h *Handler) sanitizeProxyRoutingAuthLocked() (map[string]string, bool) {
 		}
 	}
 
-	// If auth list is currently unavailable, avoid accidental destructive cleanup.
+	authDirScanned := false
+	authDirReadErr := false
+
+	// If auth list is currently unavailable, fallback to auth-dir files.
 	if len(known) == 0 {
-		// Fallback to auth-dir files so stale mappings can still be cleaned when
-		// authManager is unavailable.
 		if h.cfg != nil {
 			authDir := strings.TrimSpace(h.cfg.AuthDir)
 			if authDir != "" {
+				authDirScanned = true
 				if entries, err := os.ReadDir(authDir); err == nil {
 					for _, entry := range entries {
 						if entry == nil || entry.IsDir() {
@@ -407,13 +409,24 @@ func (h *Handler) sanitizeProxyRoutingAuthLocked() (map[string]string, bool) {
 							known[full] = struct{}{}
 						}
 					}
+				} else {
+					authDirReadErr = true
 				}
 			}
 		}
 	}
 
-	// If still no known refs, avoid accidental destructive cleanup.
+	// If still no known refs:
+	// - when auth-dir was scanned successfully and found no files, clear stale mapping keys.
+	// - otherwise keep existing mappings to avoid accidental destructive cleanup.
 	if len(known) == 0 {
+		if authDirScanned && !authDirReadErr {
+			if len(h.cfg.ProxyRoutingAuth) > 0 {
+				h.cfg.ProxyRoutingAuth = nil
+				return map[string]string{}, true
+			}
+			return map[string]string{}, false
+		}
 		copyMap := make(map[string]string, len(h.cfg.ProxyRoutingAuth))
 		for key, value := range h.cfg.ProxyRoutingAuth {
 			trimKey := strings.TrimSpace(key)

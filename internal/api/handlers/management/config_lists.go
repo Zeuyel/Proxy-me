@@ -3,6 +3,7 @@ package management
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -122,6 +123,20 @@ func (h *Handler) DeleteAPIKeys(c *gin.Context) {
 // api-key-auth
 func (h *Handler) GetAPIKeyAuth(c *gin.Context) {
 	mapping := h.cfg.APIKeyAuth
+	clean := config.NormalizeAPIKeyAuthForKnownKeys(mapping, append([]string{}, h.cfg.APIKeys...))
+	if !reflect.DeepEqual(mapping, clean) {
+		h.mu.Lock()
+		h.cfg.APIKeyAuth = clean
+		if strings.TrimSpace(h.configFilePath) != "" {
+			if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+				h.mu.Unlock()
+				c.JSON(500, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+				return
+			}
+		}
+		h.mu.Unlock()
+		mapping = clean
+	}
 	if mapping == nil {
 		mapping = map[string][]string{}
 	}
@@ -145,7 +160,7 @@ func (h *Handler) PutAPIKeyAuth(c *gin.Context) {
 		}
 		mapping = obj.Mapping
 	}
-	clean := config.NormalizeAPIKeyAuth(mapping)
+	clean := config.NormalizeAPIKeyAuthForKnownKeys(mapping, append([]string{}, h.cfg.APIKeys...))
 	h.cfg.APIKeyAuth = clean
 	h.persist(c)
 }

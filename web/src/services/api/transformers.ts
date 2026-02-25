@@ -237,8 +237,11 @@ const normalizeAmpcodeConfig = (payload: any): AmpcodeConfig | undefined => {
 const normalizeApiKeyAuth = (payload: any): Record<string, string[]> | undefined => {
   if (!payload || typeof payload !== 'object') return undefined;
   const record = payload as Record<string, unknown>;
-  const source = record['api-key-auth'] ?? record.apiKeyAuth ?? payload;
-  if (!source || typeof source !== 'object') return undefined;
+  const hasKebab = Object.prototype.hasOwnProperty.call(record, 'api-key-auth');
+  const hasCamel = Object.prototype.hasOwnProperty.call(record, 'apiKeyAuth');
+  if (!hasKebab && !hasCamel) return undefined;
+  const source = (record['api-key-auth'] ?? record.apiKeyAuth ?? {}) as unknown;
+  if (!source || typeof source !== 'object') return {};
 
   const result: Record<string, string[]> = {};
   Object.entries(source as Record<string, unknown>).forEach(([rawKey, rawValue]) => {
@@ -269,8 +272,11 @@ const normalizeApiKeyAuth = (payload: any): Record<string, string[]> | undefined
 const normalizeApiKeyExpiry = (payload: any): Record<string, string> | undefined => {
   if (!payload || typeof payload !== 'object') return undefined;
   const record = payload as Record<string, unknown>;
-  const source = record['api-key-expiry'] ?? record.apiKeyExpiry ?? payload;
-  if (!source || typeof source !== 'object') return undefined;
+  const hasKebab = Object.prototype.hasOwnProperty.call(record, 'api-key-expiry');
+  const hasCamel = Object.prototype.hasOwnProperty.call(record, 'apiKeyExpiry');
+  if (!hasKebab && !hasCamel) return undefined;
+  const source = (record['api-key-expiry'] ?? record.apiKeyExpiry ?? {}) as unknown;
+  if (!source || typeof source !== 'object') return {};
 
   const result: Record<string, string> = {};
   Object.entries(source as Record<string, unknown>).forEach(([rawKey, rawValue]) => {

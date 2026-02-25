@@ -724,7 +724,7 @@ func (cfg *Config) SanitizeAPIKeyAuth() {
 	if cfg == nil {
 		return
 	}
-	cfg.APIKeyAuth = NormalizeAPIKeyAuth(cfg.APIKeyAuth)
+	cfg.APIKeyAuth = NormalizeAPIKeyAuthForKnownKeys(cfg.APIKeyAuth, append([]string{}, cfg.APIKeys...))
 }
 
 // SanitizeAPIKeyExpiry normalizes per-client API key expiry timestamps.
@@ -937,14 +937,35 @@ func looksLikeBcrypt(s string) bool {
 // and de-duplicates auth references while preserving order.
 // Empty auth lists are preserved to allow explicit deny rules.
 func NormalizeAPIKeyAuth(entries map[string][]string) map[string][]string {
+	return NormalizeAPIKeyAuthForKnownKeys(entries, nil)
+}
+
+// NormalizeAPIKeyAuthForKnownKeys normalizes api-key-auth entries and optionally
+// filters out mapping keys that are not present in knownAPIKeys.
+func NormalizeAPIKeyAuthForKnownKeys(entries map[string][]string, knownAPIKeys []string) map[string][]string {
 	if len(entries) == 0 {
 		return nil
 	}
+	known := make(map[string]struct{}, len(knownAPIKeys))
+	for _, raw := range knownAPIKeys {
+		key := strings.TrimSpace(raw)
+		if key == "" {
+			continue
+		}
+		known[key] = struct{}{}
+	}
+	restrictToKnown := knownAPIKeys != nil
+
 	out := make(map[string][]string, len(entries))
 	for rawKey, auths := range entries {
 		key := strings.TrimSpace(rawKey)
 		if key == "" {
 			continue
+		}
+		if restrictToKnown {
+			if _, ok := known[key]; !ok {
+				continue
+			}
 		}
 		seen := make(map[string]struct{}, len(auths))
 		clean := make([]string, 0, len(auths))

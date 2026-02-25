@@ -711,6 +711,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 				}
 				deleted++
 				h.disableAuth(ctx, full)
+				h.cleanupAuthMappings("", "", filepath.Base(full), full)
 			}
 		}
 		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
@@ -740,6 +741,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		return
 	}
 	h.disableAuth(ctx, full)
+	h.cleanupAuthMappings("", "", filepath.Base(full), full)
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
@@ -925,44 +927,130 @@ func (h *Handler) disableAuth(ctx context.Context, id string) {
 		auth.StatusMessage = "removed via management API"
 		auth.UpdatedAt = time.Now()
 		_, _ = h.authManager.Update(ctx, auth)
-		// Clean up proxy-routing-auth references for this auth
-		h.cleanupProxyRoutingAuth(auth.ID, auth.Index, auth.FileName)
+		// Clean up proxy-routing-auth/api-key-auth references for this auth
+		h.cleanupAuthMappings(auth.ID, auth.Index, auth.FileName, authAttribute(auth, "path"))
 	}
 }
 
-// cleanupProxyRoutingAuth removes entries from ProxyRoutingAuth that reference the deleted auth.
-func (h *Handler) cleanupProxyRoutingAuth(authID, authIndex, fileName string) {
-	if h == nil || h.cfg == nil || len(h.cfg.ProxyRoutingAuth) == 0 {
+func buildRemovedAuthKeyCandidates(authID, authIndex, fileName, filePath, authDir string) []string {
+	candidates := make([]string, 0, 10)
+	seen := make(map[string]struct{}, 10)
+	add := func(raw string) {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			return
+		}
+		key := strings.ToLower(v)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, v)
+	}
+
+	add(authID)
+	add(authIndex)
+	add(fileName)
+	if base := strings.TrimSpace(filepath.Base(fileName)); base != "" && base != "." {
+		add(base)
+	}
+	add(filePath)
+	if base := strings.TrimSpace(filepath.Base(filePath)); base != "" && base != "." {
+		add(base)
+	}
+	if strings.TrimSpace(authDir) != "" && strings.TrimSpace(filePath) != "" {
+		if rel, err := filepath.Rel(authDir, filePath); err == nil {
+			rel = strings.TrimSpace(rel)
+			if rel != "" && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+				add(rel)
+			}
+		}
+	}
+
+	return candidates
+}
+
+func matchRemovedAuthRef(candidates []string, refs []string) []string {
+	if len(refs) == 0 || len(candidates) == 0 {
+		return refs
+	}
+	keep := make([]string, 0, len(refs))
+	for _, raw := range refs {
+		ref := strings.TrimSpace(raw)
+		if ref == "" {
+			continue
+		}
+		matched := false
+		for _, c := range candidates {
+			if strings.EqualFold(ref, c) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			keep = append(keep, ref)
+		}
+	}
+	return keep
+}
+
+// cleanupAuthMappings removes stale auth references from proxy-routing-auth and api-key-auth.
+func (h *Handler) cleanupAuthMappings(authID, authIndex, fileName, filePath string) {
+	if h == nil || h.cfg == nil {
+		return
+	}
+	candidates := buildRemovedAuthKeyCandidates(authID, authIndex, fileName, filePath, h.cfg.AuthDir)
+	if len(candidates) == 0 {
 		return
 	}
 
-	// Collect keys to delete (cannot delete while iterating)
-	var keysToDelete []string
-	for key := range h.cfg.ProxyRoutingAuth {
-		if key == authID || key == authIndex || key == fileName {
-			keysToDelete = append(keysToDelete, key)
+	changed := false
+	if len(h.cfg.ProxyRoutingAuth) > 0 {
+		for key := range h.cfg.ProxyRoutingAuth {
+			for _, c := range candidates {
+				if strings.EqualFold(strings.TrimSpace(key), c) {
+					delete(h.cfg.ProxyRoutingAuth, key)
+					changed = true
+					break
+				}
+			}
 		}
-		// Also check if key matches the base file name
-		if fileName != "" && key == filepath.Base(fileName) {
-			keysToDelete = append(keysToDelete, key)
+		if len(h.cfg.ProxyRoutingAuth) == 0 {
+			h.cfg.ProxyRoutingAuth = nil
 		}
 	}
 
-	if len(keysToDelete) == 0 {
-		return
+	if len(h.cfg.APIKeyAuth) > 0 {
+		nextAuth := make(map[string][]string, len(h.cfg.APIKeyAuth))
+		for key, refs := range h.cfg.APIKeyAuth {
+			cleaned := matchRemovedAuthRef(candidates, refs)
+			if len(cleaned) == 0 {
+				// Keep explicit deny-all semantics: empty list means no auth is allowed.
+				if len(refs) > 0 {
+					nextAuth[key] = []string{}
+					changed = true
+					continue
+				}
+				nextAuth[key] = refs
+				continue
+			}
+			nextAuth[key] = cleaned
+			if len(cleaned) != len(refs) {
+				changed = true
+			}
+		}
+		if len(nextAuth) == 0 {
+			h.cfg.APIKeyAuth = nil
+		} else {
+			h.cfg.APIKeyAuth = nextAuth
+		}
 	}
 
-	// Delete the keys
-	for _, key := range keysToDelete {
-		delete(h.cfg.ProxyRoutingAuth, key)
-	}
-
-	// Persist the config changes directly (no gin.Context available here)
-	if h.configFilePath != "" {
+	if changed && h.configFilePath != "" {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
-			log.WithError(err).Warn("failed to persist config after cleaning up proxy-routing-auth")
+			log.WithError(err).Warn("failed to persist config after cleaning up auth mapping references")
 		}
 	}
 }
