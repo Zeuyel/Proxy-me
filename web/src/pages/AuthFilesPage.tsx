@@ -192,6 +192,25 @@ function resolveQuotaErrorMessage(t: (key: string) => string, status: number | u
   return fallback;
 }
 
+function isQuotaTokenInvalidated401(status: number | undefined, message: string | undefined): boolean {
+  if (status === 401) return true;
+  const normalized = String(message ?? '')
+    .trim()
+    .toLowerCase();
+  if (!normalized) return false;
+  const has401 = normalized.includes('401');
+  const hasTokenInvalidated =
+    normalized.includes('token has been invalidated') ||
+    normalized.includes('authentication token has been invalidated');
+  const hasSignInAgain = normalized.includes('sign in again') || normalized.includes('signing in again');
+  return has401 && (hasTokenInvalidated || hasSignInAgain);
+}
+
+function hasPositiveNumber(value: unknown): boolean {
+  const num = Number(value);
+  return Number.isFinite(num) && num > 0;
+}
+
 // 解析认证文件的统计数据
 function resolveAuthFileStats(file: AuthFileItem, stats: KeyStats): KeyStatBucket {
   const defaultStats: KeyStatBucket = { success: 0, failure: 0 };
@@ -263,6 +282,7 @@ export function AuthFilesPage() {
   const [uploading, setUploading] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deletingAll, setDeletingAll] = useState(false);
+  const [deleting401, setDeleting401] = useState(false);
   const [statusUpdating, setStatusUpdating] = useState<Record<string, boolean>>({});
   const [quotaRefreshingAll, setQuotaRefreshingAll] = useState(false);
   const [quotaRefreshingSingle, setQuotaRefreshingSingle] = useState<Record<string, boolean>>({});
@@ -785,6 +805,74 @@ export function AuthFilesPage() {
     () => files.some((item) => supportsInlineQuota(item)),
     [files, supportsInlineQuota]
   );
+  const getQuotaStateForFile = useCallback((item: AuthFileItem): QuotaStatusState | undefined => {
+    const key = String(item.name || '').trim();
+    if (!key) return undefined;
+    if (isAntigravityFile(item)) return antigravityQuota[key] as QuotaStatusState | undefined;
+    if (isCodexFile(item)) return codexQuota[key] as QuotaStatusState | undefined;
+    if (isGeminiCliFile(item) && !isRuntimeOnlyAuthFile(item)) {
+      return geminiCliQuota[key] as QuotaStatusState | undefined;
+    }
+    return undefined;
+  }, [antigravityQuota, codexQuota, geminiCliQuota]);
+
+  const hasAvailableQuota = useCallback((item: AuthFileItem): boolean => {
+    const key = String(item.name || '').trim();
+    if (!key || !supportsInlineQuota(item)) return false;
+
+    if (isAntigravityFile(item)) {
+      const quota = antigravityQuota[key] as AntigravityQuotaState | undefined;
+      if (!quota || quota.status !== 'success') return false;
+      return (quota.groups ?? []).some((group) => hasPositiveNumber(group.remainingFraction));
+    }
+
+    if (isCodexFile(item)) {
+      const quota = codexQuota[key] as CodexQuotaState | undefined;
+      if (!quota || quota.status !== 'success') return false;
+      return (quota.windows ?? []).some((window) => {
+        const usedPercent = Number(window.usedPercent);
+        if (!Number.isFinite(usedPercent)) return false;
+        return usedPercent < 100;
+      });
+    }
+
+    if (isGeminiCliFile(item) && !isRuntimeOnlyAuthFile(item)) {
+      const quota = geminiCliQuota[key] as GeminiCliQuotaState | undefined;
+      if (!quota || quota.status !== 'success') return false;
+      return (quota.buckets ?? []).some((bucket) => {
+        if (hasPositiveNumber(bucket.remainingAmount)) return true;
+        return hasPositiveNumber(bucket.remainingFraction);
+      });
+    }
+
+    return false;
+  }, [antigravityQuota, codexQuota, geminiCliQuota, supportsInlineQuota]);
+
+  const enabledWithQuotaCount = useMemo(() => {
+    return files.reduce((count, file) => {
+      if (isRuntimeOnlyAuthFile(file)) return count;
+      if (isEffectiveDisabled(file)) return count;
+      if (!hasAvailableQuota(file)) return count;
+      return count + 1;
+    }, 0);
+  }, [files, hasAvailableQuota]);
+
+  const invalidated401FileNames = useMemo(() => {
+    const flagged = new Set<string>();
+    files.forEach((file) => {
+      const key = String(file.name || '').trim();
+      if (!key) return;
+      if (!supportsInlineQuota(file)) return;
+      const quota = getQuotaStateForFile(file);
+      if (!quota || quota.status !== 'error') return;
+      if (isQuotaTokenInvalidated401(quota.errorStatus, quota.error)) {
+        flagged.add(key);
+      }
+    });
+    return flagged;
+  }, [files, getQuotaStateForFile, supportsInlineQuota]);
+
+  const hasInvalidated401Targets = invalidated401FileNames.size > 0;
 
   const handleRefreshAllQuotas = useCallback(async () => {
     const targets = files.filter((item) => supportsInlineQuota(item));
@@ -1548,6 +1636,59 @@ export function AuthFilesPage() {
     );
   };
 
+  const handleDeleteInvalidated401 = useCallback(() => {
+    const targets = files.filter((file) => {
+      const name = String(file.name || '').trim();
+      return name && !isRuntimeOnlyAuthFile(file) && invalidated401FileNames.has(name);
+    });
+
+    if (targets.length === 0) {
+      showNotification(t('auth_files.delete_401_none'), 'info');
+      return;
+    }
+
+    showConfirmation({
+      title: t('auth_files.delete_401_title', { defaultValue: 'Delete Invalidated Files' }),
+      message: t('auth_files.delete_401_confirm', { count: targets.length }),
+      variant: 'danger',
+      confirmText: t('common.confirm'),
+      onConfirm: async () => {
+        setDeleting401(true);
+        try {
+          let success = 0;
+          let failed = 0;
+          const deletedNames: string[] = [];
+
+          for (const file of targets) {
+            try {
+              await authFilesApi.deleteFile(file.name);
+              success += 1;
+              deletedNames.push(file.name);
+            } catch {
+              failed += 1;
+            }
+          }
+
+          setFiles((prev) => prev.filter((file) => !deletedNames.includes(file.name)));
+
+          if (failed === 0) {
+            showNotification(t('auth_files.delete_401_success', { count: success }), 'success');
+          } else {
+            showNotification(
+              t('auth_files.delete_401_partial', { success, failed }),
+              success > 0 ? 'warning' : 'error'
+            );
+          }
+        } catch (err: unknown) {
+          const errorMessage = err instanceof Error ? err.message : '';
+          showNotification(`${t('notification.delete_failed')}: ${errorMessage}`, 'error');
+        } finally {
+          setDeleting401(false);
+        }
+      },
+    });
+  }, [files, invalidated401FileNames, showConfirmation, showNotification, t]);
+
   const renderQuotaSectionByState = (
     i18nPrefix: string,
     quota: QuotaStatusState | undefined,
@@ -1616,6 +1757,7 @@ export function AuthFilesPage() {
       const effectiveDisabled = isEffectiveDisabled(item);
       const cooldownActive = isCooldownDisabled(item);
       const disabledReason = resolveDisabledReason(item);
+      const isInvalidated401 = invalidated401FileNames.has(String(item.name || '').trim());
 	    const isAistudio = (item.type || '').toLowerCase() === 'aistudio';
 	    const showModelsButton = !isRuntimeOnly || isAistudio;
 	    const typeColor = getTypeColor(item.type || 'unknown');
@@ -1705,6 +1847,22 @@ export function AuthFilesPage() {
               )}
             </Button>
           )}
+          {!isRuntimeOnly && isInvalidated401 && (
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={() => handleDelete(item.name)}
+              className={styles.iconButton}
+              title={t('auth_files.delete_401_single_button')}
+              disabled={disableControls || deleting401 || deleting === item.name}
+            >
+              {deleting === item.name ? (
+                <LoadingSpinner size={14} />
+              ) : (
+                <IconX className={styles.actionIcon} size={16} />
+              )}
+            </Button>
+          )}
           {showModelsButton && (
             <Button
               variant="secondary"
@@ -1755,7 +1913,7 @@ export function AuthFilesPage() {
                 onClick={() => handleDelete(item.name)}
                 className={styles.iconButton}
                 title={t('auth_files.delete_button')}
-                disabled={disableControls || deleting === item.name}
+                disabled={disableControls || deleting401 || deleting === item.name}
               >
                 {deleting === item.name ? (
                   <LoadingSpinner size={14} />
@@ -1788,7 +1946,17 @@ export function AuthFilesPage() {
   const titleNode = (
     <div className={styles.titleWrapper}>
       <span>{t('auth_files.title_section')}</span>
-      {files.length > 0 && <span className={styles.countBadge}>{files.length}</span>}
+      {files.length > 0 && (
+        <span
+          className={styles.countBadge}
+          title={t('auth_files.count_badge_hint', {
+            total: files.length,
+            enabledWithQuota: enabledWithQuotaCount,
+          })}
+        >
+          {files.length}/{enabledWithQuotaCount}
+        </span>
+      )}
     </div>
   );
 
@@ -1803,8 +1971,14 @@ export function AuthFilesPage() {
         title={titleNode}
         extra={
           <div className={styles.headerActions}>
-            <Button variant="secondary" size="sm" onClick={handleHeaderRefresh} disabled={loading}>
-              {t('common.refresh')}
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleHeaderRefresh}
+              disabled={loading}
+              title={t('auth_files.refresh_data_button')}
+            >
+              {t('auth_files.refresh_data_button')}
             </Button>
             <Button
               variant="secondary"
@@ -1812,8 +1986,9 @@ export function AuthFilesPage() {
               onClick={() => void handleRefreshAllQuotas()}
               disabled={disableControls || quotaRefreshingAll || !hasQuotaTargets}
               loading={quotaRefreshingAll}
+              title={t('auth_files.refresh_quota_button')}
             >
-              {t('common.refresh_all')}
+              {t('auth_files.refresh_quota_button')}
             </Button>
             <Button
               size="sm"
@@ -1826,8 +2001,17 @@ export function AuthFilesPage() {
             <Button
               variant="danger"
               size="sm"
+              onClick={handleDeleteInvalidated401}
+              disabled={disableControls || loading || deleting401 || !hasInvalidated401Targets}
+              loading={deleting401}
+            >
+              {t('auth_files.delete_401_button')}
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
               onClick={handleDeleteAll}
-              disabled={disableControls || loading || deletingAll}
+              disabled={disableControls || loading || deletingAll || deleting401}
               loading={deletingAll}
             >
               {filter === 'all'
