@@ -8,7 +8,7 @@ A single-file WebUI (React + TypeScript) for operating and troubleshooting the *
 **Example URL**: https://remote.router-for.me/  
 **Minimum Required Version**: ≥ 6.3.0 (recommended ≥ 6.5.0)
 
-Since version 6.0.19, the WebUI ships with the main program; access it via `/management.html` on the API port once the service is running.
+Since version 6.0.19, the WebUI ships with the main program; access it via `/panel` on the API port once the service is running.
 
 ## What this is (and isn’t)
 
@@ -20,10 +20,11 @@ Since version 6.0.19, the WebUI ships with the main program; access it via `/man
 ### Option A: Use the WebUI bundled in CLIProxyAPI (recommended)
 
 1. Start your CLI Proxy API service.
-2. Open: `http://<host>:<api_port>/management.html`
+2. Open: `http://<host>:<api_port>/panel`
 3. Enter your **management key** and connect.
 
 The address is auto-detected from the current page URL; manual override is supported.
+Legacy `/management.html` is still accepted and redirected to `/panel`.
 
 ### Option B: Run the dev server
 
@@ -42,7 +43,7 @@ npm run build
 ```
 
 - Output: `dist/index.html` (all assets are inlined).
-- For CLIProxyAPI bundling, the release workflow renames it to `management.html`.
+- CLIProxyAPI serves this build as the management panel entrypoint (`/panel`).
 - To preview locally: `npm run preview`
 
 Tip: opening `dist/index.html` via `file://` may be blocked by browser CORS; serving it (preview/static server) is more reliable.
@@ -90,7 +91,7 @@ See `api.md` for the full authentication rules, server-side limits, and edge cas
 ## Build & release notes
 
 - Vite produces a **single HTML** output (`dist/index.html`) with all assets inlined (via `vite-plugin-singlefile`).
-- Tagging `vX.Y.Z` triggers `.github/workflows/release.yml` to publish `dist/management.html`.
+- Tagging `vX.Y.Z` triggers the release workflow to publish the built WebUI artifact.
 - The UI version shown in the footer is injected at build time (env `VERSION`, git tag, or `package.json` fallback).
 
 ## Security notes

@@ -181,7 +181,7 @@ func FilePath(configFilePath string) string {
 	return filepath.Join(dir, ManagementFileName)
 }
 
-// EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
+// EnsureLatestManagementHTML checks the latest panel asset and updates the local copy when needed.
 // The function is designed to run in a background goroutine and will never panic.
 // It enforces a 3-hour rate limit to avoid frequent checks on config/auth file changes.
 // MODIFIED: Disabled automatic download from GitHub, only use local static files.
@@ -206,7 +206,7 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 	// Check if local file exists
 	if _, errStat := os.Stat(localPath); errStat != nil {
 		if errors.Is(errStat, os.ErrNotExist) {
-			log.Warn("management asset not found at local path, please place management.html in static directory")
+			log.Warnf("management asset not found at local path, please place %s in static directory", managementAssetName)
 		} else {
 			log.WithError(errStat).Debug("failed to stat local management asset")
 		}

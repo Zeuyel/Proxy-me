@@ -8,7 +8,7 @@
 **示例地址**: https://remote.router-for.me/  
 **最低版本要求**: ≥ 6.3.0（推荐 ≥ 6.5.0）
 
-Since version 6.0.19, the WebUI ships with the main program; access it via `/management.html` on the API port once the service is running.
+Since version 6.0.19, the WebUI ships with the main program; access it via `/panel` on the API port once the service is running.
 
 ## 这是什么（以及不是什么）
 
@@ -20,10 +20,11 @@ Since version 6.0.19, the WebUI ships with the main program; access it via `/man
 ### 方式 A：使用 CLIProxyAPI 自带的 WebUI（推荐）
 
 1. 启动 CLI Proxy API 服务。
-2. 打开：`http://<host>:<api_port>/management.html`
+2. 打开：`http://<host>:<api_port>/panel`
 3. 输入 **管理密钥** 并连接。
 
 页面会根据当前地址自动推断 API 地址，也支持手动修改。
+历史地址 `/management.html` 仍可访问，并会自动重定向到 `/panel`。
 
 ### 方式 B：开发调试
 
@@ -42,7 +43,7 @@ npm run build
 ```
 
 - 构建产物：`dist/index.html`（资源已全部内联）。
-- 在 CLIProxyAPI 的发布流程里会重命名为 `management.html`。
+- 在 CLIProxyAPI 中会作为管理面板入口（`/panel`）提供访问。
 - 本地预览：`npm run preview`
 
 提示：直接用 `file://` 打开 `dist/index.html` 可能遇到浏览器 CORS 限制；更稳妥的方式是用预览/静态服务器打开。
@@ -90,7 +91,7 @@ npm run build
 ## 构建与发布说明
 
 - 使用 Vite 输出 **单文件 HTML**（`dist/index.html`），资源全部内联（`vite-plugin-singlefile`）。
-- 打 `vX.Y.Z` 标签会触发 `.github/workflows/release.yml`，发布 `dist/management.html`。
+- 打 `vX.Y.Z` 标签会触发发布流程并发布构建后的 WebUI 产物。
 - 页脚显示的 UI 版本在构建期注入（优先使用环境变量 `VERSION`，否则使用 git tag / `package.json`）。
 
 ## 安全提示

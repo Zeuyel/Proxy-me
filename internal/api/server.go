@@ -313,7 +313,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 // setupRoutes configures the API routes for the server.
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {
-	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	// New control panel entrypoint.
+	s.engine.GET("/panel", s.serveManagementControlPanel)
+	s.engine.GET("/panel/", s.serveManagementControlPanel)
+	// Legacy entrypoint kept for backward compatibility.
+	s.engine.GET("/management.html", func(c *gin.Context) {
+		c.Redirect(http.StatusTemporaryRedirect, "/panel")
+	})
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
