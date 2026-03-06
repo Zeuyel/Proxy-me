@@ -430,8 +430,6 @@ export function AuthFilesPage() {
     if (cached) {
       setMappingModelsList(cached);
       setMappingModelsError(null);
-      setMappingModelsLoading(false);
-      return;
     }
 
     let cancelled = false;
@@ -439,7 +437,7 @@ export function AuthFilesPage() {
     setMappingModelsError(null);
 
     authFilesApi
-      .getModelsForAuthFile(fileName)
+      .getModelsForAuthFile(fileName, undefined, true)
       .then((models) => {
         if (cancelled) return;
         modelsCacheRef.current.set(fileName, models);
@@ -643,6 +641,7 @@ export function AuthFilesPage() {
   }, [showNotification, t]);
 
   const handleHeaderRefresh = useCallback(async () => {
+    modelsCacheRef.current.clear();
     await Promise.all([
       loadFiles(),
       loadKeyStats(),
@@ -1264,20 +1263,19 @@ export function AuthFilesPage() {
     const authID = String(item.id ?? '').trim() || undefined;
     setModelsFileName(item.name);
     setModelsFileType(item.type || '');
-    setModelsList([]);
     setModelsError(null);
     setModelsModalOpen(true);
 
     const cached = modelsCacheRef.current.get(item.name);
     if (cached) {
       setModelsList(cached);
-      setModelsLoading(false);
-      return;
+    } else {
+      setModelsList([]);
     }
 
     setModelsLoading(true);
     try {
-      const models = await authFilesApi.getModelsForAuthFile(item.name, authID);
+      const models = await authFilesApi.getModelsForAuthFile(item.name, authID, true);
       modelsCacheRef.current.set(item.name, models);
       setModelsList(models);
     } catch (err) {

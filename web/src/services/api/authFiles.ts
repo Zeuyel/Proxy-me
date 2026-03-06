@@ -204,10 +204,15 @@ export const authFilesApi = {
   },
 
   // 获取认证凭证支持的模型
-  async getModelsForAuthFile(name: string, authId?: string): Promise<{ id: string; display_name?: string; type?: string; owned_by?: string }[]> {
+  async getModelsForAuthFile(
+    name: string,
+    authId?: string,
+    refresh: boolean = false
+  ): Promise<{ id: string; display_name?: string; type?: string; owned_by?: string }[]> {
     const params = new URLSearchParams();
     if (name) params.set('name', name);
     if (authId) params.set('id', authId);
+    if (refresh) params.set('refresh', '1');
     const data = await apiClient.get(`/auth-files/models?${params.toString()}`);
     return (data && Array.isArray(data['models'])) ? data['models'] : [];
   }

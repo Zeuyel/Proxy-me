@@ -808,7 +808,12 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		}
 		models = applyExcludedModels(models, excluded)
 	case "codex":
-		models = registry.GetOpenAIModels()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		models = executor.FetchCodexModels(ctx, a, s.cfg)
+		cancel()
+		if len(models) == 0 {
+			models = registry.GetOpenAIModels()
+		}
 		if entry := s.resolveConfigCodexKey(a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildCodexConfigModels(entry)

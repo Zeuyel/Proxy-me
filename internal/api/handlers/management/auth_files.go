@@ -30,6 +30,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -308,12 +309,14 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	name := strings.TrimSpace(c.Query("name"))
 	authIDQuery := strings.TrimSpace(c.Query("id"))
+	refresh := parseTruthyQueryValue(c.Query("refresh")) || parseTruthyQueryValue(c.Query("force"))
 	if name == "" && authIDQuery == "" {
 		c.JSON(400, gin.H{"error": "name or id is required"})
 		return
 	}
 
 	candidateIDs := make([]string, 0, 4)
+	candidateAuths := make(map[string]*coreauth.Auth, 4)
 	seenIDs := make(map[string]struct{}, 8)
 	addCandidate := func(id string) {
 		trimmed := strings.TrimSpace(id)
@@ -326,6 +329,20 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 		seenIDs[trimmed] = struct{}{}
 		candidateIDs = append(candidateIDs, trimmed)
 	}
+	addAuthCandidate := func(auth *coreauth.Auth) {
+		if auth == nil {
+			return
+		}
+		trimmedID := strings.TrimSpace(auth.ID)
+		if trimmedID == "" {
+			return
+		}
+		addCandidate(trimmedID)
+		if _, exists := candidateAuths[trimmedID]; exists {
+			return
+		}
+		candidateAuths[trimmedID] = auth
+	}
 
 	// Prefer explicit id/name from query first.
 	addCandidate(authIDQuery)
@@ -333,6 +350,17 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 
 	// Also scan auth manager to resolve legacy/new IDs and filename aliases.
 	if h.authManager != nil {
+		if authIDQuery != "" {
+			if auth, ok := h.authManager.GetByID(authIDQuery); ok && auth != nil {
+				addAuthCandidate(auth)
+			}
+		}
+		if name != "" {
+			if auth, ok := h.authManager.GetByID(name); ok && auth != nil {
+				addAuthCandidate(auth)
+			}
+		}
+
 		auths := h.authManager.List()
 		for _, auth := range auths {
 			if auth == nil {
@@ -347,7 +375,26 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 				matchByID = auth.ID == authIDQuery || auth.FileName == authIDQuery
 			}
 			if matchByName || matchByID {
-				addCandidate(auth.ID)
+				addAuthCandidate(auth)
+			}
+		}
+	}
+
+	refreshedModels := make(map[string][]*registry.ModelInfo, 4)
+	skipRegistry := make(map[string]struct{}, 4)
+	if refresh {
+		for authID, auth := range candidateAuths {
+			if auth == nil {
+				continue
+			}
+			if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+				continue
+			}
+			// Frontend refresh path should come from per-auth upstream /v1/models, not stale registry snapshot.
+			skipRegistry[authID] = struct{}{}
+			models := executor.FetchCodexModels(c.Request.Context(), auth, h.cfg)
+			if len(models) > 0 {
+				refreshedModels[authID] = models
 			}
 		}
 	}
@@ -356,10 +403,11 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	reg := registry.GetGlobalRegistry()
 	seenModels := make(map[string]struct{}, 32)
 	result := make([]gin.H, 0, 32)
-
-	for _, authID := range candidateIDs {
-		models := reg.GetModelsForClient(authID)
+	appendModels := func(models []*registry.ModelInfo) {
 		for _, m := range models {
+			if m == nil {
+				continue
+			}
 			modelID := strings.TrimSpace(m.ID)
 			if modelID == "" {
 				continue
@@ -386,7 +434,27 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 		}
 	}
 
+	for _, authID := range candidateIDs {
+		if models, ok := refreshedModels[authID]; ok {
+			appendModels(models)
+			continue
+		}
+		if _, skip := skipRegistry[authID]; skip {
+			continue
+		}
+		appendModels(reg.GetModelsForClient(authID))
+	}
+
 	c.JSON(200, gin.H{"models": result})
+}
+
+func parseTruthyQueryValue(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // List auth files from disk when the auth manager is unavailable.
