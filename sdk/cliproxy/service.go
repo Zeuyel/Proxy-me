@@ -822,6 +822,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
+		models = executor.FilterCodexModelsForAuth(a, models)
 		models = applyExcludedModels(models, excluded)
 	case "qwen":
 		models = registry.GetQwenModels()

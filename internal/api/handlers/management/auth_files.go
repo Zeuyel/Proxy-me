@@ -369,7 +369,7 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 			matchByName := false
 			matchByID := false
 			if name != "" {
-				matchByName = auth.FileName == name || auth.ID == name || filepath.Base(auth.ID) == name
+				matchByName = auth.FileName == name || auth.ID == name || authIDBaseName(auth.ID) == name
 			}
 			if authIDQuery != "" {
 				matchByID = auth.ID == authIDQuery || auth.FileName == authIDQuery
@@ -390,7 +390,7 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 			if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 				continue
 			}
-			// Frontend refresh path should come from per-auth upstream /v1/models, not stale registry snapshot.
+			// Frontend refresh path rebuilds the per-auth static Codex model list instead of using registry snapshot.
 			skipRegistry[authID] = struct{}{}
 			models := executor.FetchCodexModels(c.Request.Context(), auth, h.cfg)
 			if len(models) > 0 {
@@ -455,6 +455,15 @@ func parseTruthyQueryValue(raw string) bool {
 	default:
 		return false
 	}
+}
+
+func authIDBaseName(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	normalized := strings.ReplaceAll(trimmed, "\\", "/")
+	return filepath.Base(normalized)
 }
 
 // List auth files from disk when the auth manager is unavailable.
