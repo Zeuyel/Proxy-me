@@ -70,7 +70,7 @@ func TestFilterCodexModelsForAuth_PaidOAuthKeepsModels(t *testing.T) {
 	}
 }
 
-func TestFilterCodexModelsForAuth_TeamOAuthKeepsModels(t *testing.T) {
+func TestFilterCodexModelsForAuth_TeamOAuthKeepsOnly53And54(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		ID:       "codex-team@example.com-team.json",
 		FileName: "codex-team@example.com-team.json",
@@ -79,11 +79,19 @@ func TestFilterCodexModelsForAuth_TeamOAuthKeepsModels(t *testing.T) {
 	models := []*registry.ModelInfo{
 		{ID: "gpt-5.2-codex"},
 		{ID: "gpt-5.3-codex"},
+		{ID: "gpt-5.3-codex-spark"},
 		{ID: "gpt-5.4"},
+		{ID: "gpt-4o"},
 	}
 
 	filtered := FilterCodexModelsForAuth(auth, models)
-	if len(filtered) != len(models) {
-		t.Fatalf("expected team OAuth auth to keep all models, got %d", len(filtered))
+	if len(filtered) != 3 {
+		t.Fatalf("expected team OAuth auth to keep only 5.3/5.4 models, got %d", len(filtered))
+	}
+	want := []string{"gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.4"}
+	for i, model := range filtered {
+		if model == nil || model.ID != want[i] {
+			t.Fatalf("unexpected team model at %d: got %#v want %q", i, model, want[i])
+		}
 	}
 }

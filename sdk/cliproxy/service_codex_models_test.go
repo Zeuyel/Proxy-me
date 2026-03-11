@@ -44,3 +44,42 @@ func TestRegisterModelsForAuth_CodexFreeFiltersStaticFallback(t *testing.T) {
 		}
 	}
 }
+
+func TestRegisterModelsForAuth_CodexTeamKeepsOnly53And54(t *testing.T) {
+	svc := &Service{
+		cfg: &config.Config{},
+	}
+	auth := &coreauth.Auth{
+		ID:       "codex-team-static-team.json",
+		FileName: "codex-team-static-team.json",
+		Provider: "codex",
+		Metadata: map[string]any{"email": "team@example.com"},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	defer reg.UnregisterClient(auth.ID)
+
+	svc.registerModelsForAuth(auth)
+
+	models := reg.GetModelsForClient(auth.ID)
+	if len(models) == 0 {
+		t.Fatalf("expected team static fallback models to be registered")
+	}
+
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if model != nil {
+			seen[model.ID] = struct{}{}
+		}
+	}
+	for _, allowed := range []string{"gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.4"} {
+		if _, ok := seen[allowed]; !ok {
+			t.Fatalf("expected %s to remain available for team codex oauth auth", allowed)
+		}
+	}
+	for _, blocked := range []string{"gpt-5.2-codex", "gpt-5.1", "gpt-4o"} {
+		if _, ok := seen[blocked]; ok {
+			t.Fatalf("expected %s to be filtered for team codex oauth auth", blocked)
+		}
+	}
+}
