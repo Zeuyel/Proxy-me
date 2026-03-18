@@ -30,7 +30,7 @@ func TestFetchCodexModels_UsesStaticDefinitions(t *testing.T) {
 	}
 }
 
-func TestFilterCodexModelsForAuth_FreeOAuthRemoves53And54(t *testing.T) {
+func TestFilterCodexModelsForAuth_FreeOAuthRemovesOnlyUpstreamRestrictedModels(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		ID:       "codex-free@example.com-free.json",
 		FileName: "codex-free@example.com-free.json",
@@ -70,7 +70,7 @@ func TestFilterCodexModelsForAuth_PaidOAuthKeepsModels(t *testing.T) {
 	}
 }
 
-func TestFilterCodexModelsForAuth_TeamOAuthKeepsOnly53And54(t *testing.T) {
+func TestFilterCodexModelsForAuth_TeamOAuthKeepsOnlyUpstreamTeamModels(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		ID:       "codex-team@example.com-team.json",
 		FileName: "codex-team@example.com-team.json",
@@ -85,10 +85,10 @@ func TestFilterCodexModelsForAuth_TeamOAuthKeepsOnly53And54(t *testing.T) {
 	}
 
 	filtered := FilterCodexModelsForAuth(auth, models)
-	if len(filtered) != 3 {
-		t.Fatalf("expected team OAuth auth to keep only 5.3/5.4 models, got %d", len(filtered))
+	if len(filtered) != 2 {
+		t.Fatalf("expected team OAuth auth to keep only upstream team models, got %d", len(filtered))
 	}
-	want := []string{"gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.4"}
+	want := []string{"gpt-5.3-codex", "gpt-5.4"}
 	for i, model := range filtered {
 		if model == nil || model.ID != want[i] {
 			t.Fatalf("unexpected team model at %d: got %#v want %q", i, model, want[i])

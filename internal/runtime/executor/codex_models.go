@@ -10,8 +10,15 @@ import (
 )
 
 var (
-	codexFreeOAuthBlockedModelPrefixes = [...]string{"gpt-5.3", "gpt-5.4"}
-	codexTeamOAuthAllowedModelPrefixes = [...]string{"gpt-5.3", "gpt-5.4"}
+	codexFreeOAuthBlockedModelIDs = map[string]struct{}{
+		"gpt-5.3-codex":       {},
+		"gpt-5.3-codex-spark": {},
+		"gpt-5.4":             {},
+	}
+	codexTeamOAuthAllowedModelIDs = map[string]struct{}{
+		"gpt-5.3-codex": {},
+		"gpt-5.4":       {},
+	}
 )
 
 // FetchCodexModels returns the static Codex model list.
@@ -57,19 +64,11 @@ const (
 func codexModelAllowedForAccessLevel(accessLevel codexOAuthAccess, modelID string) bool {
 	switch accessLevel {
 	case codexOAuthAccessFree:
-		for _, prefix := range codexFreeOAuthBlockedModelPrefixes {
-			if strings.HasPrefix(modelID, prefix) {
-				return false
-			}
-		}
-		return true
+		_, blocked := codexFreeOAuthBlockedModelIDs[modelID]
+		return !blocked
 	case codexOAuthAccessTeam:
-		for _, prefix := range codexTeamOAuthAllowedModelPrefixes {
-			if strings.HasPrefix(modelID, prefix) {
-				return true
-			}
-		}
-		return false
+		_, allowed := codexTeamOAuthAllowedModelIDs[modelID]
+		return allowed
 	default:
 		return true
 	}
