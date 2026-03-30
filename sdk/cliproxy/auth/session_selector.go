@@ -3,13 +3,23 @@ package auth
 import (
 	"context"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/tidwall/gjson"
 )
+
+const (
+	sessionIDMaxLengthSelector = 256
+	codexSessionPrefixSelector = "codex_prev_"
+	codexSessionMinLenSelector = 21
+)
+
+var sessionIDPatternSelector = regexp.MustCompile(`^[A-Za-z0-9_.:\-]+$`)
 
 // SessionSelectorConfig controls session-aware routing behavior.
 type SessionSelectorConfig struct {
@@ -523,15 +533,67 @@ func quotaHealth(auth *Auth, model string, now time.Time) float64 {
 }
 
 func extractSessionIDFromOptions(opts cliproxyexecutor.Options) string {
-	if opts.Metadata == nil {
+	if opts.Metadata != nil {
+		raw, ok := opts.Metadata[cliproxyexecutor.SessionIDMetadataKey]
+		if ok {
+			if value, ok := raw.(string); ok {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
+	if opts.Headers != nil {
+		if value := sanitizeCodexSessionIDSelector(opts.Headers.Get("session_id")); value != "" {
+			return value
+		}
+		if value := sanitizeCodexSessionIDSelector(opts.Headers.Get("x-session-id")); value != "" {
+			return value
+		}
+	}
+	if value := extractSessionIDFromOriginalRequest(opts.OriginalRequest); value != "" {
+		return value
+	}
+	return ""
+}
+
+func sanitizeSessionIDSelector(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
 		return ""
 	}
-	raw, ok := opts.Metadata[cliproxyexecutor.SessionIDMetadataKey]
-	if !ok {
+	if len(trimmed) > sessionIDMaxLengthSelector {
 		return ""
 	}
-	if value, ok := raw.(string); ok {
-		return strings.TrimSpace(value)
+	if !sessionIDPatternSelector.MatchString(trimmed) {
+		return ""
+	}
+	return trimmed
+}
+
+func sanitizeCodexSessionIDSelector(value string) string {
+	normalized := sanitizeSessionIDSelector(value)
+	if len(normalized) < codexSessionMinLenSelector {
+		return ""
+	}
+	return normalized
+}
+
+func extractSessionIDFromOriginalRequest(rawJSON []byte) string {
+	if len(rawJSON) == 0 {
+		return ""
+	}
+	if value := sanitizeCodexSessionIDSelector(gjson.GetBytes(rawJSON, "prompt_cache_key").String()); value != "" {
+		return value
+	}
+	if value := sanitizeCodexSessionIDSelector(gjson.GetBytes(rawJSON, "metadata.session_id").String()); value != "" {
+		return value
+	}
+	if value := sanitizeCodexSessionIDSelector(gjson.GetBytes(rawJSON, "previous_response_id").String()); value != "" {
+		if prefixed := codexSessionPrefixSelector + value; len(prefixed) <= sessionIDMaxLengthSelector {
+			return prefixed
+		}
+	}
+	if value := sanitizeSessionIDSelector(gjson.GetBytes(rawJSON, "metadata.session_id").String()); value != "" {
+		return value
 	}
 	return ""
 }

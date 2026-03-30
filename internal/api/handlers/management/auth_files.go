@@ -588,6 +588,10 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
 	}
+	if accountID := resolveCodexAccountID(auth); accountID != "" {
+		entry["account_id"] = accountID
+		entry["chatgpt_account_id"] = accountID
+	}
 	return entry
 }
 
@@ -629,6 +633,40 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 		return nil
 	}
 	return result
+}
+
+func resolveCodexAccountID(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		for _, key := range []string{"account_id", "chatgpt_account_id"} {
+			if v, ok := auth.Metadata[key].(string); ok && strings.TrimSpace(v) != "" {
+				return strings.TrimSpace(v)
+			}
+		}
+		for _, key := range []string{"access_token", "id_token", "token"} {
+			raw, ok := auth.Metadata[key].(string)
+			if !ok || strings.TrimSpace(raw) == "" {
+				continue
+			}
+			claims, err := codex.ParseJWTToken(strings.TrimSpace(raw))
+			if err != nil || claims == nil {
+				continue
+			}
+			if accountID := strings.TrimSpace(claims.GetAccountID()); accountID != "" {
+				return accountID
+			}
+		}
+	}
+	if auth.Attributes != nil {
+		for _, key := range []string{"account_id", "chatgpt_account_id"} {
+			if v := strings.TrimSpace(auth.Attributes[key]); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 func authEmail(auth *coreauth.Auth) string {

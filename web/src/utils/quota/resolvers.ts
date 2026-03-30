@@ -9,10 +9,61 @@ import {
   parseIdTokenPayload
 } from './parsers';
 
-export function extractCodexChatgptAccountId(value: unknown): string | null {
-  const payload = parseIdTokenPayload(value);
+function resolveCodexAccountIdFromPayload(payload: Record<string, unknown> | null): string | null {
   if (!payload) return null;
-  return normalizeStringValue(payload.chatgpt_account_id ?? payload.chatgptAccountId);
+
+  const directCandidates = [
+    payload.account_id,
+    payload.accountId,
+    payload.chatgpt_account_id,
+    payload.chatgptAccountId
+  ];
+
+  for (const candidate of directCandidates) {
+    const value = normalizeStringValue(candidate);
+    if (value) return value;
+  }
+
+  const authNamespace =
+    payload['https://api.openai.com/auth'] &&
+    typeof payload['https://api.openai.com/auth'] === 'object' &&
+    !Array.isArray(payload['https://api.openai.com/auth'])
+      ? (payload['https://api.openai.com/auth'] as Record<string, unknown>)
+      : null;
+
+  if (!authNamespace) return null;
+
+  for (const candidate of [
+    authNamespace.account_id,
+    authNamespace.accountId,
+    authNamespace.chatgpt_account_id,
+    authNamespace.chatgptAccountId
+  ]) {
+    const value = normalizeStringValue(candidate);
+    if (value) return value;
+  }
+
+  return null;
+}
+
+export function extractCodexChatgptAccountId(value: unknown): string | null {
+  if (!value) return null;
+
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const direct = resolveCodexAccountIdFromPayload(value as Record<string, unknown>);
+    if (direct) return direct;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (!trimmed.includes('.')) {
+      return normalizeStringValue(trimmed);
+    }
+  }
+
+  const payload = parseIdTokenPayload(value);
+  return resolveCodexAccountIdFromPayload(payload);
 }
 
 export function resolveCodexChatgptAccountId(file: AuthFileItem): string | null {
@@ -25,7 +76,29 @@ export function resolveCodexChatgptAccountId(file: AuthFileItem): string | null 
       ? (file.attributes as Record<string, unknown>)
       : null;
 
-  const candidates = [file.id_token, metadata?.id_token, attributes?.id_token];
+  const candidates = [
+    file.account_id,
+    file.accountId,
+    file.chatgpt_account_id,
+    file.chatgptAccountId,
+    file.access_token,
+    file.id_token,
+    file.token,
+    metadata?.account_id,
+    metadata?.accountId,
+    metadata?.chatgpt_account_id,
+    metadata?.chatgptAccountId,
+    metadata?.access_token,
+    metadata?.id_token,
+    metadata?.token,
+    attributes?.account_id,
+    attributes?.accountId,
+    attributes?.chatgpt_account_id,
+    attributes?.chatgptAccountId,
+    attributes?.access_token,
+    attributes?.id_token,
+    attributes?.token
+  ];
 
   for (const candidate of candidates) {
     const id = extractCodexChatgptAccountId(candidate);
