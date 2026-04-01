@@ -171,3 +171,124 @@ func TestResolveTokenForAuth_Antigravity_SkipsRefreshWhenTokenValid(t *testing.T
 		t.Fatalf("expected no refresh calls, got %d", callCount)
 	}
 }
+
+func TestAPICall_SyncsCodexQuotaProbe_ClearCooldown(t *testing.T) {
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	recoverAt := time.Now().Add(30 * time.Minute)
+	auth := &coreauth.Auth{
+		ID:             "codex-test.json",
+		FileName:       "codex-test.json",
+		Provider:       "codex",
+		Status:         coreauth.StatusError,
+		StatusMessage:  "quota exhausted",
+		Unavailable:    true,
+		NextRetryAfter: recoverAt,
+		LastError:      &coreauth.Error{HTTPStatus: 429, Message: "quota"},
+		Metadata: map[string]any{
+			"access_token": "token",
+		},
+		Quota: coreauth.QuotaState{
+			Exceeded:      true,
+			Reason:        "codex_5h_limit",
+			NextRecoverAt: recoverAt,
+		},
+		ModelStates: map[string]*coreauth.ModelState{
+			"gpt-5": {
+				Status:         coreauth.StatusError,
+				StatusMessage:  "quota exhausted",
+				Unavailable:    true,
+				NextRetryAfter: recoverAt,
+				Quota: coreauth.QuotaState{
+					Exceeded:      true,
+					Reason:        "codex_5h_limit",
+					NextRecoverAt: recoverAt,
+				},
+			},
+		},
+	}
+	registered, errRegister := manager.Register(context.Background(), auth)
+	if errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	if registered == nil {
+		t.Fatalf("expected registered auth")
+	}
+
+	handler := &Handler{authManager: manager}
+	requestURL, errParseURL := url.Parse("https://example.test/backend-api/wham/usage")
+	if errParseURL != nil {
+		t.Fatalf("parse url: %v", errParseURL)
+	}
+
+	handler.syncQuotaProbeFromAPICall(context.Background(), registered, requestURL, http.StatusOK, []byte(`{
+		"rate_limit": {
+			"limit_reached": false,
+			"primary_window": { "used_percent": 80, "reset_after_seconds": 18000 }
+		}
+	}`))
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth in manager after quota probe sync")
+	}
+	if updated.Quota.Exceeded {
+		t.Fatalf("expected quota probe to clear stale codex cooldown")
+	}
+	if updated.Unavailable {
+		t.Fatalf("expected auth to be available after quota probe shows remaining quota")
+	}
+}
+
+func TestAPICall_SyncsCodexQuotaProbe_SetCooldown(t *testing.T) {
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "codex-test.json",
+		FileName: "codex-test.json",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"access_token": "token",
+		},
+		ModelStates: map[string]*coreauth.ModelState{
+			"gpt-5": {
+				Status: coreauth.StatusActive,
+			},
+		},
+	}
+	registered, errRegister := manager.Register(context.Background(), auth)
+	if errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	if registered == nil {
+		t.Fatalf("expected registered auth")
+	}
+
+	handler := &Handler{authManager: manager}
+	requestURL, errParseURL := url.Parse("https://example.test/backend-api/wham/usage")
+	if errParseURL != nil {
+		t.Fatalf("parse url: %v", errParseURL)
+	}
+
+	handler.syncQuotaProbeFromAPICall(context.Background(), registered, requestURL, http.StatusOK, []byte(`{
+		"rate_limit": {
+			"limit_reached": true,
+			"primary_window": { "used_percent": 100, "reset_after_seconds": 18000 }
+		}
+	}`))
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth in manager after quota probe sync")
+	}
+	if !updated.Quota.Exceeded {
+		t.Fatalf("expected quota probe to mark codex cooldown from usage payload")
+	}
+	if updated.Quota.Reason != "codex_5h_limit" {
+		t.Fatalf("expected codex_5h_limit reason, got %q", updated.Quota.Reason)
+	}
+	if !updated.Unavailable {
+		t.Fatalf("expected auth to be unavailable while codex usage is exhausted")
+	}
+}

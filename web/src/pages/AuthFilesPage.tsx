@@ -879,10 +879,11 @@ export function AuthFilesPage() {
     setQuotaRefreshingAll(true);
     try {
       await loadInlineQuotas(targets);
+      await loadFiles({ silent: true });
     } finally {
       setQuotaRefreshingAll(false);
     }
-  }, [files, loadInlineQuotas, supportsInlineQuota]);
+  }, [files, loadFiles, loadInlineQuotas, supportsInlineQuota]);
 
   const handleRefreshSingleQuota = useCallback(async (item: AuthFileItem) => {
     if (!supportsInlineQuota(item)) return;
@@ -891,6 +892,7 @@ export function AuthFilesPage() {
     setQuotaRefreshingSingle((prev) => ({ ...prev, [key]: true }));
     try {
       await loadInlineQuotas([item]);
+      await loadFiles({ silent: true });
     } finally {
       setQuotaRefreshingSingle((prev) => {
         const next = { ...prev };
@@ -898,7 +900,7 @@ export function AuthFilesPage() {
         return next;
       });
     }
-  }, [loadInlineQuotas, supportsInlineQuota]);
+  }, [loadFiles, loadInlineQuotas, supportsInlineQuota]);
 
   // 点击上传
   const handleUploadClick = () => {

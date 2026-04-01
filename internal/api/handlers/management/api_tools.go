@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -209,11 +210,45 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	h.syncQuotaProbeFromAPICall(c.Request.Context(), auth, parsedURL, resp.StatusCode, respBody)
+
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
 		Body:       string(respBody),
 	})
+}
+
+func (h *Handler) syncQuotaProbeFromAPICall(ctx context.Context, auth *coreauth.Auth, requestURL *url.URL, statusCode int, respBody []byte) {
+	if h == nil || h.authManager == nil || auth == nil || requestURL == nil {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return
+	}
+	if !isCodexUsageProbeRequest(requestURL) {
+		return
+	}
+	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+		return
+	}
+	if !json.Valid(respBody) {
+		return
+	}
+
+	now := time.Now()
+	if recoverAt, reason, limited := executor.DetectCodexQuotaRecoverAt(respBody, now); limited {
+		h.authManager.SyncQuotaProbe(ctx, auth.ID, true, reason, recoverAt)
+		return
+	}
+	h.authManager.SyncQuotaProbe(ctx, auth.ID, false, "", time.Time{})
+}
+
+func isCodexUsageProbeRequest(requestURL *url.URL) bool {
+	if requestURL == nil {
+		return false
+	}
+	return strings.TrimRight(strings.TrimSpace(requestURL.Path), "/") == "/backend-api/wham/usage"
 }
 
 func firstNonEmptyString(values ...*string) string {

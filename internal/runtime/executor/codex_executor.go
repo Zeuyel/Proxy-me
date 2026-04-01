@@ -713,6 +713,12 @@ func codexQuotaRecoverAt(payload []byte, now time.Time) (time.Time, string, bool
 	return earliest.resetAt, earliest.reason, true
 }
 
+// DetectCodexQuotaRecoverAt parses a Codex usage payload and returns the earliest
+// future quota recovery time when a usage window is currently exhausted.
+func DetectCodexQuotaRecoverAt(payload []byte, now time.Time) (time.Time, string, bool) {
+	return codexQuotaRecoverAt(payload, now)
+}
+
 func resolveCodexWindowReason(window gjson.Result, reasonPrimary, reasonSecondary string) string {
 	if reasonPrimary == reasonSecondary {
 		return reasonPrimary

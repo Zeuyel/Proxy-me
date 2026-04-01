@@ -1300,6 +1300,128 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.hook.OnResult(ctx, result)
 }
 
+// SyncQuotaProbe reconciles runtime quota cooldown state from an out-of-band quota probe.
+// When exceeded is false, quota-derived cooldown state is cleared from the auth and any
+// affected model states. When exceeded is true, the cooldown is applied to the auth and
+// existing non-disabled model states.
+func (m *Manager) SyncQuotaProbe(ctx context.Context, authID string, exceeded bool, reason string, recoverAt time.Time) {
+	if m == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+
+	now := time.Now()
+	clearQuotaModels := make([]string, 0, 4)
+	resumeModels := make([]string, 0, 4)
+	setQuotaModels := make([]string, 0, 4)
+	var authClone *Auth
+
+	m.mu.Lock()
+	if auth, ok := m.auths[authID]; ok && auth != nil {
+		if exceeded {
+			quotaReason := strings.TrimSpace(reason)
+			if quotaReason == "" {
+				quotaReason = "quota"
+			}
+			if !recoverAt.IsZero() && recoverAt.Before(now) {
+				recoverAt = time.Time{}
+			}
+
+			auth.Quota = QuotaState{
+				Exceeded:      true,
+				Reason:        quotaReason,
+				NextRecoverAt: recoverAt,
+				BackoffLevel:  auth.Quota.BackoffLevel,
+			}
+			if !(auth.Disabled || auth.Status == StatusDisabled) {
+				auth.Unavailable = true
+				auth.Status = StatusError
+				auth.StatusMessage = "quota exhausted"
+				auth.NextRetryAfter = recoverAt
+			}
+
+			for model, state := range auth.ModelStates {
+				if state == nil || state.Status == StatusDisabled {
+					continue
+				}
+				backoffLevel := state.Quota.BackoffLevel
+				state.Unavailable = true
+				state.Status = StatusError
+				state.StatusMessage = "quota exhausted"
+				state.NextRetryAfter = recoverAt
+				state.Quota = QuotaState{
+					Exceeded:      true,
+					Reason:        quotaReason,
+					NextRecoverAt: recoverAt,
+					BackoffLevel:  backoffLevel,
+				}
+				state.UpdatedAt = now
+				setQuotaModels = append(setQuotaModels, model)
+			}
+		} else {
+			if auth.Quota.Exceeded {
+				auth.Quota = QuotaState{}
+				if !(auth.Disabled || auth.Status == StatusDisabled) {
+					auth.Unavailable = false
+					auth.NextRetryAfter = time.Time{}
+				}
+				if auth.LastError != nil && auth.LastError.StatusCode() == http.StatusTooManyRequests {
+					auth.LastError = nil
+				}
+				if strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "quota exhausted") {
+					auth.StatusMessage = ""
+				}
+			}
+
+			for model, state := range auth.ModelStates {
+				if state == nil || !state.Quota.Exceeded {
+					continue
+				}
+				clearQuotaModels = append(clearQuotaModels, model)
+				if state.Status == StatusDisabled {
+					state.Quota = QuotaState{}
+					state.NextRetryAfter = time.Time{}
+					state.UpdatedAt = now
+					continue
+				}
+				resetModelState(state, now)
+				resumeModels = append(resumeModels, model)
+			}
+
+			updateAggregatedAvailability(auth, now)
+			if !hasModelError(auth, now) && !auth.Unavailable && !(auth.Disabled || auth.Status == StatusDisabled) {
+				auth.Status = StatusActive
+				auth.StatusMessage = ""
+			} else if !auth.Quota.Exceeded && strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "quota exhausted") {
+				auth.StatusMessage = ""
+			}
+		}
+
+		auth.UpdatedAt = now
+		_ = m.persist(ctx, auth)
+		authClone = auth.Clone()
+	}
+	m.mu.Unlock()
+
+	registryRef := registry.GetGlobalRegistry()
+	for _, model := range clearQuotaModels {
+		registryRef.ClearModelQuotaExceeded(authID, model)
+	}
+	for _, model := range resumeModels {
+		registryRef.ResumeClientModel(authID, model)
+	}
+	for _, model := range setQuotaModels {
+		registryRef.SetModelQuotaExceeded(authID, model)
+		registryRef.SuspendClientModel(authID, model, "quota")
+	}
+	if authClone != nil {
+		m.hook.OnAuthUpdated(ctx, authClone)
+	}
+}
+
 func ensureModelState(auth *Auth, model string) *ModelState {
 	if auth == nil || model == "" {
 		return nil
