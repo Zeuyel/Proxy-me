@@ -59,10 +59,33 @@ type ClaudeAuth struct {
 // Returns:
 //   - *ClaudeAuth: A new Claude authentication service instance
 func NewClaudeAuth(cfg *config.Config) *ClaudeAuth {
+	return NewClaudeAuthWithProxyURL(cfg, "")
+}
+
+// NewClaudeAuthWithProxyURL creates a new ClaudeAuth with a proxy override.
+// A non-empty proxyURL takes precedence over cfg.ProxyURL. The special value
+// "direct" disables proxying for auth requests.
+func NewClaudeAuthWithProxyURL(cfg *config.Config, proxyURL string) *ClaudeAuth {
+	var sdkCfg *config.SDKConfig
+	effectiveProxyURL := strings.TrimSpace(proxyURL)
+	if strings.EqualFold(effectiveProxyURL, "direct") {
+		effectiveProxyURL = ""
+	}
+	if cfg != nil {
+		sdkCfgCopy := cfg.SDKConfig
+		if effectiveProxyURL == "" && !strings.EqualFold(strings.TrimSpace(proxyURL), "direct") {
+			effectiveProxyURL = strings.TrimSpace(cfg.ProxyURL)
+		}
+		sdkCfgCopy.ProxyURL = effectiveProxyURL
+		sdkCfg = &sdkCfgCopy
+	} else if effectiveProxyURL != "" {
+		sdkCfgCopy := config.SDKConfig{ProxyURL: effectiveProxyURL}
+		sdkCfg = &sdkCfgCopy
+	}
 	// Use custom HTTP client with Firefox TLS fingerprint to bypass
 	// Cloudflare's bot detection on Anthropic domains
 	return &ClaudeAuth{
-		httpClient: NewAnthropicHttpClient(&cfg.SDKConfig),
+		httpClient: NewAnthropicHttpClient(sdkCfg),
 	}
 }
 

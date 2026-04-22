@@ -37,8 +37,27 @@ type CodexAuth struct {
 // NewCodexAuth creates a new CodexAuth service instance.
 // It initializes an HTTP client with proxy settings from the provided configuration.
 func NewCodexAuth(cfg *config.Config) *CodexAuth {
+	return NewCodexAuthWithProxyURL(cfg, "")
+}
+
+// NewCodexAuthWithProxyURL creates a new CodexAuth with a proxy override.
+// A non-empty proxyURL takes precedence over cfg.ProxyURL. The special value
+// "direct" disables proxying for auth requests.
+func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
+	var sdkCfg config.SDKConfig
+	effectiveProxyURL := strings.TrimSpace(proxyURL)
+	if strings.EqualFold(effectiveProxyURL, "direct") {
+		effectiveProxyURL = ""
+	}
+	if cfg != nil {
+		sdkCfg = cfg.SDKConfig
+		if effectiveProxyURL == "" && !strings.EqualFold(strings.TrimSpace(proxyURL), "direct") {
+			effectiveProxyURL = strings.TrimSpace(cfg.ProxyURL)
+		}
+	}
+	sdkCfg.ProxyURL = effectiveProxyURL
 	return &CodexAuth{
-		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
+		httpClient: util.SetProxy(&sdkCfg, &http.Client{}),
 	}
 }
 

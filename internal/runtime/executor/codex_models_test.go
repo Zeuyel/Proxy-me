@@ -19,14 +19,23 @@ func TestFetchCodexModels_UsesStaticDefinitions(t *testing.T) {
 		t.Fatalf("expected static codex models")
 	}
 	seen54 := false
+	seen55 := false
 	for _, model := range models {
-		if model != nil && model.ID == "gpt-5.4" {
+		if model == nil {
+			continue
+		}
+		switch model.ID {
+		case "gpt-5.4":
 			seen54 = true
-			break
+		case "gpt-5.5":
+			seen55 = true
 		}
 	}
 	if !seen54 {
 		t.Fatalf("expected gpt-5.4 in static codex model list")
+	}
+	if !seen55 {
+		t.Fatalf("expected gpt-5.5 in static codex model list")
 	}
 }
 
@@ -41,6 +50,7 @@ func TestFilterCodexModelsForAuth_FreeOAuthRemovesOnlyUpstreamRestrictedModels(t
 		{ID: "gpt-5.3-codex"},
 		{ID: "gpt-5.3-codex-spark"},
 		{ID: "gpt-5.4"},
+		{ID: "gpt-5.5"},
 	}
 
 	filtered := FilterCodexModelsForAuth(auth, models)
@@ -62,6 +72,7 @@ func TestFilterCodexModelsForAuth_PaidOAuthKeepsModels(t *testing.T) {
 		{ID: "gpt-5.2-codex"},
 		{ID: "gpt-5.3-codex"},
 		{ID: "gpt-5.4"},
+		{ID: "gpt-5.5"},
 	}
 
 	filtered := FilterCodexModelsForAuth(auth, models)
@@ -81,14 +92,15 @@ func TestFilterCodexModelsForAuth_TeamOAuthKeepsOnlyUpstreamTeamModels(t *testin
 		{ID: "gpt-5.3-codex"},
 		{ID: "gpt-5.3-codex-spark"},
 		{ID: "gpt-5.4"},
+		{ID: "gpt-5.5"},
 		{ID: "gpt-4o"},
 	}
 
 	filtered := FilterCodexModelsForAuth(auth, models)
-	if len(filtered) != 2 {
+	if len(filtered) != 3 {
 		t.Fatalf("expected team OAuth auth to keep only upstream team models, got %d", len(filtered))
 	}
-	want := []string{"gpt-5.3-codex", "gpt-5.4"}
+	want := []string{"gpt-5.3-codex", "gpt-5.4", "gpt-5.5"}
 	for i, model := range filtered {
 		if model == nil || model.ID != want[i] {
 			t.Fatalf("unexpected team model at %d: got %#v want %q", i, model, want[i])

@@ -50,8 +50,11 @@ const (
 	refreshCheckInterval  = 5 * time.Second
 	refreshPendingBackoff = time.Minute
 	refreshFailureBackoff = 5 * time.Minute
-	quotaBackoffBase      = time.Second
-	quotaBackoffMax       = 30 * time.Minute
+	// Throttle refresh loops when an executor reports success but the auth still
+	// looks refreshable, such as when expiry metadata was not advanced.
+	refreshIneffectiveBackoff = 30 * time.Second
+	quotaBackoffBase          = time.Second
+	quotaBackoffMax           = 30 * time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -2279,6 +2282,9 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	updated.NextRefreshAfter = time.Time{}
 	updated.LastError = nil
 	updated.UpdatedAt = now
+	if m.shouldRefresh(updated, now) {
+		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
+	}
 	_, _ = m.Update(ctx, updated)
 }
 

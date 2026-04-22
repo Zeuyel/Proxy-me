@@ -14,10 +14,12 @@ var (
 		"gpt-5.3-codex":       {},
 		"gpt-5.3-codex-spark": {},
 		"gpt-5.4":             {},
+		"gpt-5.5":             {},
 	}
 	codexTeamOAuthAllowedModelIDs = map[string]struct{}{
 		"gpt-5.3-codex": {},
 		"gpt-5.4":       {},
+		"gpt-5.5":       {},
 	}
 )
 

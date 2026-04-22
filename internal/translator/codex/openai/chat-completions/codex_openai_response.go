@@ -8,6 +8,8 @@ package chat_completions
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -26,6 +28,7 @@ type ConvertCliToOpenAIParams struct {
 	FunctionCallIndex         int
 	HasReceivedArgumentsDelta bool
 	HasToolCallAnnounced      bool
+	LastImageHashByItemID     map[string][32]byte
 }
 
 // ConvertCodexResponseToOpenAI translates a single chunk of a streaming response from the
@@ -51,6 +54,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			FunctionCallIndex:         -1,
 			HasReceivedArgumentsDelta: false,
 			HasToolCallAnnounced:      false,
+			LastImageHashByItemID:     make(map[string][32]byte),
 		}
 	}
 
@@ -70,12 +74,19 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		(*param).(*ConvertCliToOpenAIParams).ResponseID = rootResult.Get("response.id").String()
 		(*param).(*ConvertCliToOpenAIParams).CreatedAt = rootResult.Get("response.created_at").Int()
 		(*param).(*ConvertCliToOpenAIParams).Model = rootResult.Get("response.model").String()
+		if (*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID == nil {
+			(*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID = make(map[string][32]byte)
+		}
 		return []string{}
 	}
 
 	// Extract and set the model version.
 	if modelResult := gjson.GetBytes(rawJSON, "model"); modelResult.Exists() {
 		template, _ = sjson.Set(template, "model", modelResult.String())
+	} else if cachedModel := (*param).(*ConvertCliToOpenAIParams).Model; cachedModel != "" {
+		template, _ = sjson.Set(template, "model", cachedModel)
+	} else if modelName != "" {
+		template, _ = sjson.Set(template, "model", modelName)
 	}
 
 	template, _ = sjson.Set(template, "created", (*param).(*ConvertCliToOpenAIParams).CreatedAt)
@@ -93,6 +104,9 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 		if inputTokensResult := usageResult.Get("input_tokens"); inputTokensResult.Exists() {
 			template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokensResult.Int())
+		}
+		if cachedTokensResult := usageResult.Get("input_tokens_details.cached_tokens"); cachedTokensResult.Exists() {
+			template, _ = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", cachedTokensResult.Int())
 		}
 		if reasoningTokensResult := usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {
 			template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", reasoningTokensResult.Int())
@@ -112,6 +126,27 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
 			template, _ = sjson.Set(template, "choices.0.delta.content", deltaResult.String())
 		}
+	} else if dataType == "response.image_generation_call.partial_image" {
+		itemID := rootResult.Get("item_id").String()
+		b64 := rootResult.Get("partial_image_b64").String()
+		if b64 == "" {
+			return []string{}
+		}
+		if itemID != "" {
+			hash := sha256.Sum256([]byte(b64))
+			if last, ok := (*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID[itemID]; ok && last == hash {
+				return []string{}
+			}
+			(*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID[itemID] = hash
+		}
+
+		imageURL := "data:" + mimeTypeFromCodexOutputFormat(rootResult.Get("output_format").String()) + ";base64," + b64
+		imagePayload := `{"type":"image_url","image_url":{"url":""}}`
+		imagePayload, _ = sjson.Set(imagePayload, "index", 0)
+		imagePayload, _ = sjson.Set(imagePayload, "image_url.url", imageURL)
+		template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
+		template, _ = sjson.SetRaw(template, "choices.0.delta.images", `[]`)
+		template, _ = sjson.SetRaw(template, "choices.0.delta.images.-1", imagePayload)
 	} else if dataType == "response.completed" {
 		finishReason := "stop"
 		if (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex != -1 {
@@ -175,7 +210,33 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 
 	} else if dataType == "response.output_item.done" {
 		itemResult := rootResult.Get("item")
-		if !itemResult.Exists() || itemResult.Get("type").String() != "function_call" {
+		if !itemResult.Exists() {
+			return []string{}
+		}
+		if itemResult.Get("type").String() == "image_generation_call" {
+			itemID := itemResult.Get("id").String()
+			b64 := itemResult.Get("result").String()
+			if b64 == "" {
+				return []string{}
+			}
+			if itemID != "" {
+				hash := sha256.Sum256([]byte(b64))
+				if last, ok := (*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID[itemID]; ok && last == hash {
+					return []string{}
+				}
+				(*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID[itemID] = hash
+			}
+
+			imageURL := "data:" + mimeTypeFromCodexOutputFormat(itemResult.Get("output_format").String()) + ";base64," + b64
+			imagePayload := `{"type":"image_url","image_url":{"url":""}}`
+			imagePayload, _ = sjson.Set(imagePayload, "index", 0)
+			imagePayload, _ = sjson.Set(imagePayload, "image_url.url", imageURL)
+			template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
+			template, _ = sjson.SetRaw(template, "choices.0.delta.images", `[]`)
+			template, _ = sjson.SetRaw(template, "choices.0.delta.images.-1", imagePayload)
+			return []string{template}
+		}
+		if itemResult.Get("type").String() != "function_call" {
 			return []string{}
 		}
 
@@ -208,6 +269,17 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 
 	} else {
 		return []string{}
+	}
+
+	for _, path := range []string{
+		"choices.0.delta.role",
+		"choices.0.delta.content",
+		"choices.0.delta.reasoning_content",
+		"choices.0.delta.tool_calls",
+	} {
+		if gjson.Get(template, path).Raw == "null" {
+			template, _ = sjson.Delete(template, path)
+		}
 	}
 
 	return []string{template}
@@ -279,6 +351,7 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 		var contentText string
 		var reasoningText string
 		var toolCalls []string
+		var images []string
 
 		for _, outputItem := range outputArray {
 			outputType := outputItem.Get("type").String()
@@ -328,6 +401,15 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 				}
 
 				toolCalls = append(toolCalls, functionCallTemplate)
+			case "image_generation_call":
+				b64 := outputItem.Get("result").String()
+				if b64 == "" {
+					break
+				}
+				imagePayload := `{"type":"image_url","image_url":{"url":""}}`
+				imagePayload, _ = sjson.Set(imagePayload, "index", len(images))
+				imagePayload, _ = sjson.Set(imagePayload, "image_url.url", "data:"+mimeTypeFromCodexOutputFormat(outputItem.Get("output_format").String())+";base64,"+b64)
+				images = append(images, imagePayload)
 			}
 		}
 
@@ -347,6 +429,13 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 			template, _ = sjson.SetRaw(template, "choices.0.message.tool_calls", `[]`)
 			for _, toolCall := range toolCalls {
 				template, _ = sjson.SetRaw(template, "choices.0.message.tool_calls.-1", toolCall)
+			}
+			template, _ = sjson.Set(template, "choices.0.message.role", "assistant")
+		}
+		if len(images) > 0 {
+			template, _ = sjson.SetRaw(template, "choices.0.message.images", `[]`)
+			for _, image := range images {
+				template, _ = sjson.SetRaw(template, "choices.0.message.images.-1", image)
 			}
 			template, _ = sjson.Set(template, "choices.0.message.role", "assistant")
 		}
@@ -393,4 +482,25 @@ func buildReverseMapFromOriginalOpenAI(original []byte) map[string]string {
 		}
 	}
 	return rev
+}
+
+func mimeTypeFromCodexOutputFormat(outputFormat string) string {
+	if outputFormat == "" {
+		return "image/png"
+	}
+	if strings.Contains(outputFormat, "/") {
+		return outputFormat
+	}
+	switch strings.ToLower(outputFormat) {
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "webp":
+		return "image/webp"
+	case "gif":
+		return "image/gif"
+	default:
+		return "image/png"
+	}
 }

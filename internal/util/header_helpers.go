@@ -47,6 +47,12 @@ func applyCustomHeaders(r *http.Request, headers map[string]string) {
 		if k == "" || v == "" {
 			continue
 		}
+		// net/http writes Host from req.Host rather than req.Header, so mirror it.
+		// Keep the header map value too because some synthetic request paths only
+		// inspect r.Header after custom headers are applied.
+		if http.CanonicalHeaderKey(k) == "Host" {
+			r.Host = v
+		}
 		r.Header.Set(k, v)
 	}
 }
