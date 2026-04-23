@@ -22,7 +22,10 @@ import (
 )
 
 const (
-	defaultImagesMainModel = "gpt-5.4-mini"
+	// Route image requests through a model that is already exposed by the local
+	// Codex/OpenAI compatibility registry. The upstream code uses gpt-5.4-mini,
+	// but this fork does not currently register that internal model name.
+	defaultImagesMainModel = "gpt-5.4"
 	defaultImagesToolModel = "gpt-image-2"
 )
 
