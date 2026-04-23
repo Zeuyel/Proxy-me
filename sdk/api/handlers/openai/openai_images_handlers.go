@@ -26,7 +26,6 @@ const (
 	// Codex/OpenAI compatibility registry. The upstream code uses gpt-5.4-mini,
 	// but this fork does not currently register that internal model name.
 	defaultImagesMainModel = "gpt-5.4"
-	defaultImagesToolModel = "gpt-image-2"
 )
 
 type imageCallResult struct {
@@ -310,18 +309,13 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		return
 	}
 
-	imageModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
-	if imageModel == "" {
-		imageModel = defaultImagesToolModel
-	}
 	responseFormat := strings.TrimSpace(gjson.GetBytes(rawJSON, "response_format").String())
 	if responseFormat == "" {
 		responseFormat = "b64_json"
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
-	tool := []byte(`{"type":"image_generation","action":"generate"}`)
-	tool, _ = sjson.SetBytes(tool, "model", imageModel)
+	tool := []byte(`{"type":"image_generation","output_format":"png"}`)
 
 	if v := strings.TrimSpace(gjson.GetBytes(rawJSON, "size").String()); v != "" {
 		tool, _ = sjson.SetBytes(tool, "size", v)
@@ -445,18 +439,13 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		maskDataURL = &dataURL
 	}
 
-	imageModel := strings.TrimSpace(c.PostForm("model"))
-	if imageModel == "" {
-		imageModel = defaultImagesToolModel
-	}
 	responseFormat := strings.TrimSpace(c.PostForm("response_format"))
 	if responseFormat == "" {
 		responseFormat = "b64_json"
 	}
 	stream := parseBoolField(c.PostForm("stream"), false)
 
-	tool := []byte(`{"type":"image_generation","action":"edit"}`)
-	tool, _ = sjson.SetBytes(tool, "model", imageModel)
+	tool := []byte(`{"type":"image_generation","output_format":"png"}`)
 
 	if v := strings.TrimSpace(c.PostForm("size")); v != "" {
 		tool, _ = sjson.SetBytes(tool, "size", v)
@@ -565,18 +554,13 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 		return
 	}
 
-	imageModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
-	if imageModel == "" {
-		imageModel = defaultImagesToolModel
-	}
 	responseFormat := strings.TrimSpace(gjson.GetBytes(rawJSON, "response_format").String())
 	if responseFormat == "" {
 		responseFormat = "b64_json"
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
-	tool := []byte(`{"type":"image_generation","action":"edit"}`)
-	tool, _ = sjson.SetBytes(tool, "model", imageModel)
+	tool := []byte(`{"type":"image_generation","output_format":"png"}`)
 
 	for _, field := range []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"} {
 		if v := strings.TrimSpace(gjson.GetBytes(rawJSON, field).String()); v != "" {
