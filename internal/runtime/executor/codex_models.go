@@ -20,6 +20,7 @@ var (
 		"gpt-5.3-codex": {},
 		"gpt-5.4":       {},
 		"gpt-5.5":       {},
+		"gpt-image-2":   {},
 	}
 )
 
@@ -28,7 +29,7 @@ var (
 func FetchCodexModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
 	_ = ctx
 	_ = cfg
-	return FilterCodexModelsForAuth(auth, registry.GetOpenAIModels())
+	return FilterCodexModelsForAuth(auth, registry.WithCodexBuiltins(registry.GetOpenAIModels()))
 }
 
 // FilterCodexModelsForAuth removes models that should not be exposed for a given Codex auth.

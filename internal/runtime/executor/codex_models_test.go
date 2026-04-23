@@ -20,6 +20,7 @@ func TestFetchCodexModels_UsesStaticDefinitions(t *testing.T) {
 	}
 	seen54 := false
 	seen55 := false
+	seenImage2 := false
 	for _, model := range models {
 		if model == nil {
 			continue
@@ -29,6 +30,8 @@ func TestFetchCodexModels_UsesStaticDefinitions(t *testing.T) {
 			seen54 = true
 		case "gpt-5.5":
 			seen55 = true
+		case "gpt-image-2":
+			seenImage2 = true
 		}
 	}
 	if !seen54 {
@@ -36,6 +39,9 @@ func TestFetchCodexModels_UsesStaticDefinitions(t *testing.T) {
 	}
 	if !seen55 {
 		t.Fatalf("expected gpt-5.5 in static codex model list")
+	}
+	if !seenImage2 {
+		t.Fatalf("expected gpt-image-2 in static codex model list")
 	}
 }
 
@@ -51,14 +57,18 @@ func TestFilterCodexModelsForAuth_FreeOAuthRemovesOnlyUpstreamRestrictedModels(t
 		{ID: "gpt-5.3-codex-spark"},
 		{ID: "gpt-5.4"},
 		{ID: "gpt-5.5"},
+		{ID: "gpt-image-2"},
 	}
 
 	filtered := FilterCodexModelsForAuth(auth, models)
-	if len(filtered) != 1 {
-		t.Fatalf("expected 1 model after filtering, got %d", len(filtered))
+	if len(filtered) != 2 {
+		t.Fatalf("expected 2 models after filtering, got %d", len(filtered))
 	}
 	if filtered[0].ID != "gpt-5.2-codex" {
 		t.Fatalf("expected gpt-5.2-codex to remain, got %q", filtered[0].ID)
+	}
+	if filtered[1].ID != "gpt-image-2" {
+		t.Fatalf("expected gpt-image-2 to remain, got %q", filtered[1].ID)
 	}
 }
 
@@ -73,6 +83,7 @@ func TestFilterCodexModelsForAuth_PaidOAuthKeepsModels(t *testing.T) {
 		{ID: "gpt-5.3-codex"},
 		{ID: "gpt-5.4"},
 		{ID: "gpt-5.5"},
+		{ID: "gpt-image-2"},
 	}
 
 	filtered := FilterCodexModelsForAuth(auth, models)
@@ -93,14 +104,15 @@ func TestFilterCodexModelsForAuth_TeamOAuthKeepsOnlyUpstreamTeamModels(t *testin
 		{ID: "gpt-5.3-codex-spark"},
 		{ID: "gpt-5.4"},
 		{ID: "gpt-5.5"},
+		{ID: "gpt-image-2"},
 		{ID: "gpt-4o"},
 	}
 
 	filtered := FilterCodexModelsForAuth(auth, models)
-	if len(filtered) != 3 {
+	if len(filtered) != 4 {
 		t.Fatalf("expected team OAuth auth to keep only upstream team models, got %d", len(filtered))
 	}
-	want := []string{"gpt-5.3-codex", "gpt-5.4", "gpt-5.5"}
+	want := []string{"gpt-5.3-codex", "gpt-5.4", "gpt-5.5", "gpt-image-2"}
 	for i, model := range filtered {
 		if model == nil || model.ID != want[i] {
 			t.Fatalf("unexpected team model at %d: got %#v want %q", i, model, want[i])

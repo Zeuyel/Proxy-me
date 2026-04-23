@@ -572,8 +572,8 @@ func (s *Service) Run(ctx context.Context) error {
 			} else if nextMode == "session" {
 				if selector, ok := s.coreManager.GetSelector().(*coreauth.SessionSelector); ok {
 					selector.UpdateConfig(coreauth.SessionSelectorConfig{
-						Enabled:           newCfg.Routing.Session.Enabled,
-						Providers:         newCfg.Routing.Session.Providers,
+						Enabled:          newCfg.Routing.Session.Enabled,
+						Providers:        newCfg.Routing.Session.Providers,
 						TTL:              time.Duration(newCfg.Routing.Session.TTLSeconds) * time.Second,
 						FailureThreshold: newCfg.Routing.Session.FailureThreshold,
 						Cooldown:         time.Duration(newCfg.Routing.Session.CooldownSeconds) * time.Second,
@@ -1259,7 +1259,7 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return buildConfigModels(entry.Models, "openai", "openai")
+	return registry.WithCodexBuiltins(buildConfigModels(entry.Models, "openai", "openai"))
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {
