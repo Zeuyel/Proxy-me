@@ -41,10 +41,20 @@ type upstreamRequestLog struct {
 
 type upstreamAttempt struct {
 	index                int
+	provider             string
+	url                  string
+	method               string
+	authID               string
+	authLabel            string
+	startedAt            time.Time
+	firstChunkAt         time.Time
+	chunkCount           int
+	responseBytes        int
 	request              string
 	response             *strings.Builder
 	responseIntroWritten bool
 	statusWritten        bool
+	statusCode           int
 	headersWritten       bool
 	bodyStarted          bool
 	bodyHasContent       bool
@@ -89,13 +99,33 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	builder.WriteString("\n\n")
 
 	attempt := &upstreamAttempt{
-		index:    index,
-		request:  builder.String(),
-		response: &strings.Builder{},
+		index:     index,
+		provider:  info.Provider,
+		url:       info.URL,
+		method:    info.Method,
+		authID:    info.AuthID,
+		authLabel: info.AuthLabel,
+		startedAt: time.Now(),
+		request:   builder.String(),
+		response:  &strings.Builder{},
 	}
 	attempts = append(attempts, attempt)
 	ginCtx.Set(apiAttemptsKey, attempts)
 	updateAggregatedRequest(ginCtx, attempts)
+
+	logFields := log.Fields{
+		"attempt":  index,
+		"provider": strings.TrimSpace(info.Provider),
+		"method":   strings.TrimSpace(info.Method),
+		"url":      strings.TrimSpace(info.URL),
+	}
+	if strings.TrimSpace(info.AuthID) != "" {
+		logFields["auth_id"] = strings.TrimSpace(info.AuthID)
+	}
+	if strings.TrimSpace(info.AuthLabel) != "" {
+		logFields["auth_label"] = strings.TrimSpace(info.AuthLabel)
+	}
+	logWithRequestID(ctx).WithFields(logFields).Info("upstream request started")
 }
 
 // recordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
@@ -113,6 +143,7 @@ func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 	if status > 0 && !attempt.statusWritten {
 		attempt.response.WriteString(fmt.Sprintf("Status: %d\n", status))
 		attempt.statusWritten = true
+		attempt.statusCode = status
 	}
 	if !attempt.headersWritten {
 		attempt.response.WriteString("Headers:\n")
@@ -157,6 +188,22 @@ func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	}
 	attempt.response.WriteString(fmt.Sprintf("Error: %s\n", err.Error()))
 	attempt.errorWritten = true
+
+	fields := log.Fields{
+		"attempt":  attempt.index,
+		"provider": attempt.provider,
+		"method":   attempt.method,
+		"url":      attempt.url,
+		"error":    err.Error(),
+	}
+	if !attempt.startedAt.IsZero() {
+		fields["duration_ms"] = time.Since(attempt.startedAt).Milliseconds()
+	}
+	if attempt.chunkCount > 0 {
+		fields["chunk_count"] = attempt.chunkCount
+		fields["response_bytes"] = attempt.responseBytes
+	}
+	logWithRequestID(ctx).WithFields(fields).Warn("upstream request failed")
 
 	updateAggregatedResponse(ginCtx, attempts)
 }
@@ -206,6 +253,19 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 		attempt.response.WriteString("Body:\n")
 		attempt.bodyStarted = true
 	}
+	if attempt.firstChunkAt.IsZero() {
+		attempt.firstChunkAt = time.Now()
+		logWithRequestID(ctx).WithFields(log.Fields{
+			"attempt":       attempt.index,
+			"provider":      attempt.provider,
+			"method":        attempt.method,
+			"url":           attempt.url,
+			"status":        attempt.statusCode,
+			"first_byte_ms": attempt.firstChunkAt.Sub(attempt.startedAt).Milliseconds(),
+		}).Info("upstream response received first payload")
+	}
+	attempt.chunkCount++
+	attempt.responseBytes += len(data)
 	if attempt.bodyHasContent {
 		attempt.response.WriteString("\n\n")
 	}

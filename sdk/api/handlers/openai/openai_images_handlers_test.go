@@ -38,7 +38,7 @@ func TestCollectImagesFromResponsesStreamUsesOutputItemDoneImageWhenCompletedOut
 	close(data)
 	close(errs)
 
-	out, errMsg := collectImagesFromResponsesStream(ctx, data, errs, "b64_json")
+	out, summary, errMsg := collectImagesFromResponsesStream(ctx, data, errs, "b64_json")
 	if errMsg != nil {
 		t.Fatalf("unexpected error: %+v", errMsg)
 	}
@@ -52,6 +52,9 @@ func TestCollectImagesFromResponsesStreamUsesOutputItemDoneImageWhenCompletedOut
 	if got := gjson.GetBytes(out, "usage.num_images").Int(); got != 1 {
 		t.Fatalf("usage.num_images = %d, want 1; out=%s", got, out)
 	}
+	if summary.ImageCount != 1 || summary.UsageImages != 1 || summary.OutputFormat != "png" {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
 }
 
 func TestCollectImagesFromResponsesStreamDedupesOutputItemDoneAndCompletedImage(t *testing.T) {
@@ -64,12 +67,15 @@ func TestCollectImagesFromResponsesStreamDedupesOutputItemDoneAndCompletedImage(
 	close(data)
 	close(errs)
 
-	out, errMsg := collectImagesFromResponsesStream(ctx, data, errs, "b64_json")
+	out, summary, errMsg := collectImagesFromResponsesStream(ctx, data, errs, "b64_json")
 	if errMsg != nil {
 		t.Fatalf("unexpected error: %+v", errMsg)
 	}
 
 	if got := len(gjson.GetBytes(out, "data").Array()); got != 1 {
 		t.Fatalf("data length = %d, want 1; out=%s", got, out)
+	}
+	if summary.ImageCount != 1 || summary.OutputFormat != "png" {
+		t.Fatalf("unexpected summary: %+v", summary)
 	}
 }

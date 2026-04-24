@@ -25,6 +25,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"golang.org/x/net/context"
@@ -53,8 +54,8 @@ type ErrorDetail struct {
 const idempotencyKeyMetadataKey = "idempotency_key"
 
 const (
-	defaultStreamingKeepAliveSeconds = 0
-	defaultStreamingBootstrapRetries = 0
+	defaultStreamingKeepAliveSeconds    = 0
+	defaultStreamingBootstrapRetries    = 0
 	defaultNonStreamingKeepAliveSeconds = 5
 )
 
@@ -78,6 +79,16 @@ const (
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:\-]+$`)
 
 var nonStreamingKeepAlivePayload = []byte(strings.Repeat(" ", 2048) + "\n")
+
+func requestLogEntry(ctx context.Context) *log.Entry {
+	if ctx == nil {
+		return log.NewEntry(log.StandardLogger())
+	}
+	if requestID := logging.GetRequestID(ctx); requestID != "" {
+		return log.WithField("request_id", requestID)
+	}
+	return log.NewEntry(log.StandardLogger())
+}
 
 func clientAPIKeyFromGin(c *gin.Context) string {
 	if c == nil {
@@ -751,6 +762,17 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		reqMeta[coreexecutor.SessionIDMetadataKey] = sessionID
 		ctx = coreauth.WithSessionID(ctx, sessionID)
 	}
+	logEntry := requestLogEntry(ctx).WithFields(log.Fields{
+		"handler_type": handlerType,
+		"model":        normalizedModel,
+		"providers":    strings.Join(providers, ","),
+	})
+	if alt != "" {
+		logEntry = logEntry.WithField("alt", alt)
+	}
+	if sessionID != "" {
+		logEntry = logEntry.WithField("session_id", sessionID)
+	}
 	updateMonitorRequestContext(ctx, handlerType, normalizedModel, sessionID)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
@@ -763,8 +785,14 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
+	startedAt := time.Now()
 	chunks, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
+		logEntry.WithFields(log.Fields{
+			"duration_ms": time.Since(startedAt).Milliseconds(),
+			"status":      statusFromError(err),
+			"error":       err.Error(),
+		}).Warn("stream dispatch failed before upstream stream started")
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
@@ -790,6 +818,9 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		sentPayload := false
 		bootstrapRetries := 0
 		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
+		var firstPayloadAt time.Time
+		chunkCount := 0
+		payloadBytes := 0
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
 			if ctx == nil {
@@ -839,6 +870,18 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 				if ctx != nil {
 					select {
 					case <-ctx.Done():
+						fields := log.Fields{
+							"duration_ms":   time.Since(startedAt).Milliseconds(),
+							"sent_payload":  sentPayload,
+							"retry_count":   bootstrapRetries,
+							"chunk_count":   chunkCount,
+							"payload_bytes": payloadBytes,
+							"error":         ctx.Err(),
+						}
+						if !firstPayloadAt.IsZero() {
+							fields["first_byte_ms"] = firstPayloadAt.Sub(startedAt).Milliseconds()
+						}
+						logEntry.WithFields(fields).Info("stream cancelled")
 						return
 					case chunk, ok = <-chunks:
 					}
@@ -846,6 +889,17 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 					chunk, ok = <-chunks
 				}
 				if !ok {
+					fields := log.Fields{
+						"duration_ms":   time.Since(startedAt).Milliseconds(),
+						"sent_payload":  sentPayload,
+						"retry_count":   bootstrapRetries,
+						"chunk_count":   chunkCount,
+						"payload_bytes": payloadBytes,
+					}
+					if !firstPayloadAt.IsZero() {
+						fields["first_byte_ms"] = firstPayloadAt.Sub(startedAt).Milliseconds()
+					}
+					logEntry.WithFields(fields).Info("stream completed")
 					return
 				}
 				if chunk.Err != nil {
@@ -855,11 +909,22 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 					if !sentPayload {
 						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
 							bootstrapRetries++
+							logEntry.WithFields(log.Fields{
+								"retry_attempt": bootstrapRetries,
+								"max_retries":   maxBootstrapRetries,
+								"status":        statusFromError(streamErr),
+								"error":         streamErr.Error(),
+							}).Warn("stream bootstrap failed before first payload; retrying")
 							retryChunks, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 							if retryErr == nil {
 								chunks = retryChunks
 								continue outer
 							}
+							logEntry.WithFields(log.Fields{
+								"retry_attempt": bootstrapRetries,
+								"status":        statusFromError(retryErr),
+								"error":         retryErr.Error(),
+							}).Warn("stream bootstrap retry failed")
 							streamErr = retryErr
 						}
 					}
@@ -876,10 +941,31 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 							addon = hdr.Clone()
 						}
 					}
+					fields := log.Fields{
+						"duration_ms":   time.Since(startedAt).Milliseconds(),
+						"status":        status,
+						"sent_payload":  sentPayload,
+						"retry_count":   bootstrapRetries,
+						"chunk_count":   chunkCount,
+						"payload_bytes": payloadBytes,
+						"error":         streamErr.Error(),
+					}
+					if !firstPayloadAt.IsZero() {
+						fields["first_byte_ms"] = firstPayloadAt.Sub(startedAt).Milliseconds()
+					}
+					logEntry.WithFields(fields).Warn("stream execution failed")
 					_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
 					return
 				}
 				if len(chunk.Payload) > 0 {
+					chunkCount++
+					payloadBytes += len(chunk.Payload)
+					if !sentPayload {
+						firstPayloadAt = time.Now()
+						logEntry.WithFields(log.Fields{
+							"first_byte_ms": firstPayloadAt.Sub(startedAt).Milliseconds(),
+						}).Info("stream received first upstream payload")
+					}
 					sentPayload = true
 					if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
 						return

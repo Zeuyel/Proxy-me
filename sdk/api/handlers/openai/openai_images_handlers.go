@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	intlogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -42,6 +43,13 @@ type imageStreamResults struct {
 	items     []imageCallResult
 	firstMeta imageCallResult
 	seen      map[string]struct{}
+}
+
+type imageResponseSummary struct {
+	ImageCount   int
+	CreatedAt    int64
+	OutputFormat string
+	UsageImages  int64
 }
 
 type sseFrameAccumulator struct {
@@ -93,6 +101,16 @@ func responsesSSEHasField(chunk []byte, prefix []byte) bool {
 		}
 	}
 	return false
+}
+
+func imageLogEntry(c *gin.Context) *log.Entry {
+	if c == nil {
+		return log.NewEntry(log.StandardLogger())
+	}
+	if requestID := intlogging.GetGinRequestID(c); requestID != "" {
+		return log.WithField("request_id", requestID)
+	}
+	return log.NewEntry(log.StandardLogger())
 }
 
 func responsesSSECanEmitWithoutDelimiter(chunk []byte) bool {
@@ -326,6 +344,14 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
+	imageLogEntry(c).WithFields(log.Fields{
+		"endpoint":        "/v1/images/generations",
+		"tool_model":      imageModel,
+		"main_model":      defaultImagesMainModel,
+		"stream":          stream,
+		"response_format": responseFormat,
+		"prompt_len":      len(prompt),
+	}).Info("image request accepted")
 
 	tool := []byte(`{"type":"image_generation","action":"generate","output_format":"png"}`)
 	tool, _ = sjson.SetBytes(tool, "model", imageModel)
@@ -583,6 +609,16 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
+	imageLogEntry(c).WithFields(log.Fields{
+		"endpoint":        "/v1/images/edits",
+		"tool_model":      imageModel,
+		"main_model":      defaultImagesMainModel,
+		"stream":          stream,
+		"response_format": responseFormat,
+		"prompt_len":      len(prompt),
+		"image_count":     len(images),
+		"has_mask":        maskDataURL != nil && strings.TrimSpace(*maskDataURL) != "",
+	}).Info("image edit request accepted")
 
 	tool := []byte(`{"type":"image_generation","action":"edit","output_format":"png"}`)
 	tool, _ = sjson.SetBytes(tool, "model", imageModel)
@@ -639,15 +675,30 @@ func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte
 
 func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesReq []byte, responseFormat string) {
 	c.Header("Content-Type", "application/json")
+	startedAt := time.Now()
+	logger := imageLogEntry(c).WithFields(log.Fields{
+		"mode":            "nonstream",
+		"main_model":      defaultImagesMainModel,
+		"response_format": responseFormat,
+	})
+	logger.Info("image upstream collection started")
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	dataChan, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", defaultImagesMainModel, responsesReq, "")
 
-	out, errMsg := collectImagesFromResponsesStream(cliCtx, dataChan, errChan, responseFormat)
+	out, summary, errMsg := collectImagesFromResponsesStream(cliCtx, dataChan, errChan, responseFormat)
 	stopKeepAlive()
 	if errMsg != nil {
+		fields := log.Fields{
+			"duration_ms": time.Since(startedAt).Milliseconds(),
+			"status":      errMsg.StatusCode,
+		}
+		if errMsg.Error != nil {
+			fields["error"] = errMsg.Error.Error()
+		}
+		logger.WithFields(fields).Warn("image upstream collection failed")
 		h.WriteErrorResponse(c, errMsg)
 		if errMsg.Error != nil {
 			cliCancel(errMsg.Error)
@@ -657,14 +708,21 @@ func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesR
 		return
 	}
 	_, _ = c.Writer.Write(out)
+	logger.WithFields(log.Fields{
+		"duration_ms":   time.Since(startedAt).Milliseconds(),
+		"image_count":   summary.ImageCount,
+		"created_at":    summary.CreatedAt,
+		"output_format": summary.OutputFormat,
+		"usage_images":  summary.UsageImages,
+	}).Info("image upstream collection completed")
 	cliCancel()
 }
 
-func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, errs <-chan *interfaces.ErrorMessage, responseFormat string) ([]byte, *interfaces.ErrorMessage) {
+func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, errs <-chan *interfaces.ErrorMessage, responseFormat string) ([]byte, imageResponseSummary, *interfaces.ErrorMessage) {
 	acc := &sseFrameAccumulator{}
 	collected := &imageStreamResults{}
 
-	processFrame := func(frame []byte) ([]byte, bool, *interfaces.ErrorMessage) {
+	processFrame := func(frame []byte) ([]byte, imageResponseSummary, bool, *interfaces.ErrorMessage) {
 		for _, line := range bytes.Split(frame, []byte("\n")) {
 			trimmed := bytes.TrimSpace(bytes.TrimRight(line, "\r"))
 			if len(trimmed) == 0 {
@@ -678,7 +736,7 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 				continue
 			}
 			if !json.Valid(payload) {
-				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("invalid SSE data JSON")}
+				return nil, imageResponseSummary{}, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("invalid SSE data JSON")}
 			}
 
 			switch gjson.GetBytes(payload, "type").String() {
@@ -689,51 +747,56 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 			case "response.completed":
 				results, createdAt, usageRaw, firstMeta, err := extractImagesFromResponsesCompleted(payload)
 				if err != nil {
-					return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+					return nil, imageResponseSummary{}, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
 				}
 				collected.AddMany(results)
 
 				if len(collected.items) == 0 {
-					return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("upstream did not return image output")}
+					return nil, imageResponseSummary{}, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("upstream did not return image output")}
 				}
 				if firstMeta.Result == "" && collected.firstMeta.Result != "" {
 					firstMeta = collected.firstMeta
 				}
 				out, err := buildImagesAPIResponse(collected.items, createdAt, usageRaw, firstMeta, responseFormat)
 				if err != nil {
-					return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: err}
+					return nil, imageResponseSummary{}, false, &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: err}
 				}
-				return out, true, nil
+				return out, imageResponseSummary{
+					ImageCount:   len(collected.items),
+					CreatedAt:    createdAt,
+					OutputFormat: firstMeta.OutputFormat,
+					UsageImages:  gjson.GetBytes(usageRaw, "num_images").Int(),
+				}, true, nil
 			}
 		}
-		return nil, false, nil
+		return nil, imageResponseSummary{}, false, nil
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, &interfaces.ErrorMessage{StatusCode: http.StatusRequestTimeout, Error: ctx.Err()}
+			return nil, imageResponseSummary{}, &interfaces.ErrorMessage{StatusCode: http.StatusRequestTimeout, Error: ctx.Err()}
 		case errMsg, ok := <-errs:
 			if ok && errMsg != nil {
-				return nil, errMsg
+				return nil, imageResponseSummary{}, errMsg
 			}
 			errs = nil
 		case chunk, ok := <-data:
 			if !ok {
 				for _, frame := range acc.Flush() {
-					if out, done, errMsg := processFrame(frame); errMsg != nil {
-						return nil, errMsg
+					if out, summary, done, errMsg := processFrame(frame); errMsg != nil {
+						return nil, imageResponseSummary{}, errMsg
 					} else if done {
-						return out, nil
+						return out, summary, nil
 					}
 				}
-				return nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("stream disconnected before completion")}
+				return nil, imageResponseSummary{}, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("stream disconnected before completion")}
 			}
 			for _, frame := range acc.AddChunk(chunk) {
-				if out, done, errMsg := processFrame(frame); errMsg != nil {
-					return nil, errMsg
+				if out, summary, done, errMsg := processFrame(frame); errMsg != nil {
+					return nil, imageResponseSummary{}, errMsg
 				} else if done {
-					return out, nil
+					return out, summary, nil
 				}
 			}
 		}
@@ -833,6 +896,15 @@ func (r *imageStreamResults) AddMany(items []imageCallResult) {
 	}
 }
 
+func firstNonEmptyOutputFormat(results []imageCallResult) string {
+	for _, item := range results {
+		if strings.TrimSpace(item.OutputFormat) != "" {
+			return strings.TrimSpace(item.OutputFormat)
+		}
+	}
+	return ""
+}
+
 func buildImagesAPIResponse(results []imageCallResult, createdAt int64, usageRaw []byte, firstMeta imageCallResult, responseFormat string) ([]byte, error) {
 	out := []byte(`{"created":0,"data":[]}`)
 	out, _ = sjson.SetBytes(out, "created", createdAt)
@@ -887,6 +959,14 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 		})
 		return
 	}
+	startedAt := time.Now()
+	logger := imageLogEntry(c).WithFields(log.Fields{
+		"mode":            "stream",
+		"stream_prefix":   streamPrefix,
+		"main_model":      defaultImagesMainModel,
+		"response_format": responseFormat,
+	})
+	logger.Info("image upstream stream started")
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	dataChan, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", defaultImagesMainModel, responsesReq, "")
@@ -917,6 +997,16 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 				errChan = nil
 				continue
 			}
+			fields := log.Fields{
+				"duration_ms": time.Since(startedAt).Milliseconds(),
+			}
+			if errMsg != nil {
+				fields["status"] = errMsg.StatusCode
+				if errMsg.Error != nil {
+					fields["error"] = errMsg.Error.Error()
+				}
+			}
+			logger.WithFields(fields).Warn("image upstream stream failed before first event")
 			h.WriteErrorResponse(c, errMsg)
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
@@ -935,13 +1025,13 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 
 			setSSEHeaders()
 
-			h.forwardImagesStream(cliCtx, c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, chunk, responseFormat, streamPrefix, writeEvent)
+			h.forwardImagesStream(cliCtx, c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, chunk, responseFormat, streamPrefix, writeEvent, logger, startedAt)
 			return
 		}
 	}
 }
 
-func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, firstChunk []byte, responseFormat string, streamPrefix string, writeEvent func(string, []byte)) {
+func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, firstChunk []byte, responseFormat string, streamPrefix string, writeEvent func(string, []byte), logger *log.Entry, startedAt time.Time) {
 	acc := &sseFrameAccumulator{}
 
 	responseFormat = strings.ToLower(strings.TrimSpace(responseFormat))
@@ -960,6 +1050,13 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 		errText := http.StatusText(status)
 		if errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
 			errText = errMsg.Error.Error()
+		}
+		if logger != nil {
+			logger.WithFields(log.Fields{
+				"duration_ms": time.Since(startedAt).Milliseconds(),
+				"status":      status,
+				"error":       errText,
+			}).Warn("image upstream stream emitted error")
 		}
 		body := handlers.BuildErrorResponseBody(status, errText)
 		writeEvent("error", body)
@@ -1004,6 +1101,14 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 				if len(results) == 0 {
 					emitError(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("upstream did not return image output")})
 					return true
+				}
+				if logger != nil {
+					logger.WithFields(log.Fields{
+						"duration_ms":   time.Since(startedAt).Milliseconds(),
+						"image_count":   len(results),
+						"output_format": firstNonEmptyOutputFormat(results),
+						"usage_images":  gjson.GetBytes(usageRaw, "num_images").Int(),
+					}).Info("image upstream stream completed")
 				}
 				eventName := streamPrefix + ".completed"
 				for _, img := range results {
