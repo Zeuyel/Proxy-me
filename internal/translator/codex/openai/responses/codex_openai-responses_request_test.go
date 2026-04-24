@@ -317,3 +317,45 @@ func TestTruncationRemovedForCodexCompatibility(t *testing.T) {
 		t.Fatalf("truncation should be removed for Codex compatibility")
 	}
 }
+
+func TestBuiltInToolsAndToolChoiceArePreserved(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"tools": [
+			{"type": "image_generation"},
+			{"type": "web_search_preview"}
+		],
+		"tool_choice": {"type": "image_generation"},
+		"input": [{"role":"user","content":"draw a cat"}]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "tools.0.type").String(); got != "image_generation" {
+		t.Fatalf("tools.0.type = %q, want %q", got, "image_generation")
+	}
+	if got := gjson.Get(outputStr, "tools.1.type").String(); got != "web_search_preview" {
+		t.Fatalf("tools.1.type = %q, want %q", got, "web_search_preview")
+	}
+	if got := gjson.Get(outputStr, "tool_choice.type").String(); got != "image_generation" {
+		t.Fatalf("tool_choice.type = %q, want %q", got, "image_generation")
+	}
+}
+
+func TestCodexResponsesRequestDefaultsToolChoiceAndVerbosityForGPT5(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.5",
+		"input": [{"role":"user","content":"hello"}]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.5", inputJSON, false)
+	outputStr := string(output)
+
+	if got := gjson.Get(outputStr, "tool_choice").String(); got != "auto" {
+		t.Fatalf("tool_choice = %q, want %q", got, "auto")
+	}
+	if got := gjson.Get(outputStr, "text.verbosity").String(); got != "low" {
+		t.Fatalf("text.verbosity = %q, want %q", got, "low")
+	}
+}

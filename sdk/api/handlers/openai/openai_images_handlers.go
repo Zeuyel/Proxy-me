@@ -26,6 +26,7 @@ const (
 	// Codex/OpenAI compatibility registry. The upstream code uses gpt-5.4-mini,
 	// but this fork does not currently register that internal model name.
 	defaultImagesMainModel = "gpt-5.4"
+	defaultImagesToolModel = "gpt-image-2"
 )
 
 type imageCallResult struct {
@@ -35,6 +36,12 @@ type imageCallResult struct {
 	Size          string
 	Background    string
 	Quality       string
+}
+
+type imageStreamResults struct {
+	items     []imageCallResult
+	firstMeta imageCallResult
+	seen      map[string]struct{}
 }
 
 type sseFrameAccumulator struct {
@@ -315,7 +322,13 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
-	tool := []byte(`{"type":"image_generation","output_format":"png"}`)
+	imageModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	if imageModel == "" {
+		imageModel = defaultImagesToolModel
+	}
+
+	tool := []byte(`{"type":"image_generation","action":"generate","output_format":"png"}`)
+	tool, _ = sjson.SetBytes(tool, "model", imageModel)
 
 	if v := strings.TrimSpace(gjson.GetBytes(rawJSON, "size").String()); v != "" {
 		tool, _ = sjson.SetBytes(tool, "size", v)
@@ -445,7 +458,13 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	}
 	stream := parseBoolField(c.PostForm("stream"), false)
 
-	tool := []byte(`{"type":"image_generation","output_format":"png"}`)
+	imageModel := strings.TrimSpace(c.PostForm("model"))
+	if imageModel == "" {
+		imageModel = defaultImagesToolModel
+	}
+
+	tool := []byte(`{"type":"image_generation","action":"edit","output_format":"png"}`)
+	tool, _ = sjson.SetBytes(tool, "model", imageModel)
 
 	if v := strings.TrimSpace(c.PostForm("size")); v != "" {
 		tool, _ = sjson.SetBytes(tool, "size", v)
@@ -560,7 +579,13 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
-	tool := []byte(`{"type":"image_generation","output_format":"png"}`)
+	imageModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	if imageModel == "" {
+		imageModel = defaultImagesToolModel
+	}
+
+	tool := []byte(`{"type":"image_generation","action":"edit","output_format":"png"}`)
+	tool, _ = sjson.SetBytes(tool, "model", imageModel)
 
 	for _, field := range []string{"size", "quality", "background", "output_format", "input_fidelity", "moderation"} {
 		if v := strings.TrimSpace(gjson.GetBytes(rawJSON, field).String()); v != "" {
@@ -637,6 +662,7 @@ func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesR
 
 func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, errs <-chan *interfaces.ErrorMessage, responseFormat string) ([]byte, *interfaces.ErrorMessage) {
 	acc := &sseFrameAccumulator{}
+	collected := &imageStreamResults{}
 
 	processFrame := func(frame []byte) ([]byte, bool, *interfaces.ErrorMessage) {
 		for _, line := range bytes.Split(frame, []byte("\n")) {
@@ -655,22 +681,30 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("invalid SSE data JSON")}
 			}
 
-			if gjson.GetBytes(payload, "type").String() != "response.completed" {
-				continue
-			}
+			switch gjson.GetBytes(payload, "type").String() {
+			case "response.output_item.done":
+				if item, ok := extractImageFromResponsesOutputItemDone(payload); ok {
+					collected.Add(item)
+				}
+			case "response.completed":
+				results, createdAt, usageRaw, firstMeta, err := extractImagesFromResponsesCompleted(payload)
+				if err != nil {
+					return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+				}
+				collected.AddMany(results)
 
-			results, createdAt, usageRaw, firstMeta, err := extractImagesFromResponsesCompleted(payload)
-			if err != nil {
-				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+				if len(collected.items) == 0 {
+					return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("upstream did not return image output")}
+				}
+				if firstMeta.Result == "" && collected.firstMeta.Result != "" {
+					firstMeta = collected.firstMeta
+				}
+				out, err := buildImagesAPIResponse(collected.items, createdAt, usageRaw, firstMeta, responseFormat)
+				if err != nil {
+					return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: err}
+				}
+				return out, true, nil
 			}
-			if len(results) == 0 {
-				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("upstream did not return image output")}
-			}
-			out, err := buildImagesAPIResponse(results, createdAt, usageRaw, firstMeta, responseFormat)
-			if err != nil {
-				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: err}
-			}
-			return out, true, nil
 		}
 		return nil, false, nil
 	}
@@ -746,6 +780,57 @@ func extractImagesFromResponsesCompleted(payload []byte) (results []imageCallRes
 	}
 
 	return results, createdAt, usageRaw, firstMeta, nil
+}
+
+func extractImageFromResponsesOutputItemDone(payload []byte) (imageCallResult, bool) {
+	if gjson.GetBytes(payload, "type").String() != "response.output_item.done" {
+		return imageCallResult{}, false
+	}
+
+	item := gjson.GetBytes(payload, "item")
+	if !item.Exists() || item.Get("type").String() != "image_generation_call" {
+		return imageCallResult{}, false
+	}
+
+	res := strings.TrimSpace(item.Get("result").String())
+	if res == "" {
+		return imageCallResult{}, false
+	}
+
+	return imageCallResult{
+		Result:        res,
+		RevisedPrompt: strings.TrimSpace(item.Get("revised_prompt").String()),
+		OutputFormat:  strings.TrimSpace(item.Get("output_format").String()),
+		Size:          strings.TrimSpace(item.Get("size").String()),
+		Background:    strings.TrimSpace(item.Get("background").String()),
+		Quality:       strings.TrimSpace(item.Get("quality").String()),
+	}, true
+}
+
+func (r *imageStreamResults) Add(item imageCallResult) {
+	if strings.TrimSpace(item.Result) == "" {
+		return
+	}
+	if r.seen == nil {
+		r.seen = make(map[string]struct{})
+	}
+
+	key := item.OutputFormat + "\x00" + item.Result
+	if _, exists := r.seen[key]; exists {
+		return
+	}
+	r.seen[key] = struct{}{}
+
+	if len(r.items) == 0 {
+		r.firstMeta = item
+	}
+	r.items = append(r.items, item)
+}
+
+func (r *imageStreamResults) AddMany(items []imageCallResult) {
+	for _, item := range items {
+		r.Add(item)
+	}
 }
 
 func buildImagesAPIResponse(results []imageCallResult, createdAt int64, usageRaw []byte, firstMeta imageCallResult, responseFormat string) ([]byte, error) {

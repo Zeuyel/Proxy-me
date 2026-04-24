@@ -25,6 +25,12 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON, _ = sjson.SetBytes(rawJSON, "store", false)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "include", []string{"reasoning.encrypted_content"})
+	if !gjson.GetBytes(rawJSON, "tool_choice").Exists() {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "tool_choice", "auto")
+	}
+	if shouldDefaultCodexVerbosity(modelName) && !gjson.GetBytes(rawJSON, "text.verbosity").Exists() {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "text.verbosity", "low")
+	}
 	// Codex Responses rejects token limit fields, so strip them out before forwarding.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_output_tokens")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_completion_tokens")
@@ -120,6 +126,14 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
 
 	return rawJSON
+}
+
+func shouldDefaultCodexVerbosity(modelName string) bool {
+	modelName = strings.ToLower(strings.TrimSpace(modelName))
+	if modelName == "" || modelName == "gpt-image-2" {
+		return false
+	}
+	return strings.HasPrefix(modelName, "gpt-5")
 }
 
 // applyResponsesCompactionCompatibility handles OpenAI Responses context_management.compaction
