@@ -28,6 +28,7 @@ const (
 	// but this fork does not currently register that internal model name.
 	defaultImagesMainModel = "gpt-5.4"
 	defaultImagesToolModel = "gpt-image-2"
+	imageJSONShellPrefix   = `{"_proxy_me_progress":"`
 )
 
 type imageCallResult struct {
@@ -50,6 +51,19 @@ type imageResponseSummary struct {
 	CreatedAt    int64
 	OutputFormat string
 	UsageImages  int64
+}
+
+type imageCollectionResult struct {
+	out     []byte
+	summary imageResponseSummary
+	errMsg  *interfaces.ErrorMessage
+}
+
+type imageJSONShellWriter struct {
+	writer  io.Writer
+	flusher http.Flusher
+	stopCh  chan struct{}
+	doneCh  chan struct{}
 }
 
 type sseFrameAccumulator struct {
@@ -684,38 +698,87 @@ func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesR
 	logger.Info("image upstream collection started")
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-
 	dataChan, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", defaultImagesMainModel, responsesReq, "")
 
-	out, summary, errMsg := collectImagesFromResponsesStream(cliCtx, dataChan, errChan, responseFormat)
-	stopKeepAlive()
-	if errMsg != nil {
-		fields := log.Fields{
-			"duration_ms": time.Since(startedAt).Milliseconds(),
-			"status":      errMsg.StatusCode,
-		}
-		if errMsg.Error != nil {
-			fields["error"] = errMsg.Error.Error()
-		}
-		logger.WithFields(fields).Warn("image upstream collection failed")
-		h.WriteErrorResponse(c, errMsg)
-		if errMsg.Error != nil {
-			cliCancel(errMsg.Error)
-		} else {
-			cliCancel(nil)
-		}
-		return
+	resultCh := make(chan imageCollectionResult, 1)
+	go func() {
+		out, summary, errMsg := collectImagesFromResponsesStream(cliCtx, dataChan, errChan, responseFormat)
+		resultCh <- imageCollectionResult{out: out, summary: summary, errMsg: errMsg}
+	}()
+
+	shellDelay := 2 * time.Second
+	delayTimer := time.NewTimer(shellDelay)
+	defer delayTimer.Stop()
+
+	var shellWriter *imageJSONShellWriter
+	shellStarted := false
+	shellInterval := handlers.NonStreamingKeepAliveInterval(h.Cfg)
+	if shellInterval <= 0 {
+		shellInterval = 5 * time.Second
 	}
-	_, _ = c.Writer.Write(out)
-	logger.WithFields(log.Fields{
-		"duration_ms":   time.Since(startedAt).Milliseconds(),
-		"image_count":   summary.ImageCount,
-		"created_at":    summary.CreatedAt,
-		"output_format": summary.OutputFormat,
-		"usage_images":  summary.UsageImages,
-	}).Info("image upstream collection completed")
-	cliCancel()
+
+	for {
+		select {
+		case <-cliCtx.Done():
+			logger.WithFields(log.Fields{
+				"duration_ms": time.Since(startedAt).Milliseconds(),
+				"error":       cliCtx.Err(),
+			}).Warn("image upstream collection cancelled")
+			return
+		case <-delayTimer.C:
+			shellWriter = startImageJSONShell(c, shellInterval)
+			shellStarted = shellWriter != nil
+			if shellStarted {
+				logger.WithFields(log.Fields{
+					"delay_ms":    shellDelay.Milliseconds(),
+					"interval_ms": shellInterval.Milliseconds(),
+					"compat_mode": "json_shell",
+				}).Info("image nonstream compatibility shell started")
+			}
+		case result := <-resultCh:
+			if result.errMsg != nil {
+				fields := log.Fields{
+					"duration_ms": time.Since(startedAt).Milliseconds(),
+					"status":      result.errMsg.StatusCode,
+				}
+				if result.errMsg.Error != nil {
+					fields["error"] = result.errMsg.Error.Error()
+				}
+				logger.WithFields(fields).Warn("image upstream collection failed")
+				if shellStarted {
+					if err := shellWriter.finishWithError(result.errMsg); err != nil {
+						logger.WithField("shell_error", err.Error()).Warn("failed to finalize image compatibility shell with error")
+					}
+				} else {
+					h.WriteErrorResponse(c, result.errMsg)
+				}
+				if result.errMsg.Error != nil {
+					cliCancel(result.errMsg.Error)
+				} else {
+					cliCancel(nil)
+				}
+				return
+			}
+
+			if shellStarted {
+				if err := shellWriter.finishWithObject(result.out); err != nil {
+					logger.WithField("shell_error", err.Error()).Warn("failed to finalize image compatibility shell")
+				}
+			} else {
+				_, _ = c.Writer.Write(result.out)
+			}
+			logger.WithFields(log.Fields{
+				"duration_ms":   time.Since(startedAt).Milliseconds(),
+				"image_count":   result.summary.ImageCount,
+				"created_at":    result.summary.CreatedAt,
+				"output_format": result.summary.OutputFormat,
+				"usage_images":  result.summary.UsageImages,
+				"compat_mode":   map[bool]string{true: "json_shell", false: "standard"}[shellStarted],
+			}).Info("image upstream collection completed")
+			cliCancel(nil)
+			return
+		}
+	}
 }
 
 func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, errs <-chan *interfaces.ErrorMessage, responseFormat string) ([]byte, imageResponseSummary, *interfaces.ErrorMessage) {
@@ -903,6 +966,111 @@ func firstNonEmptyOutputFormat(results []imageCallResult) string {
 		}
 	}
 	return ""
+}
+
+func startImageJSONShell(c *gin.Context, interval time.Duration) *imageJSONShellWriter {
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		return nil
+	}
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+
+	c.Header("Content-Type", "application/json")
+	c.Header("X-Accel-Buffering", "no")
+	_, _ = c.Writer.Write([]byte(imageJSONShellPrefix))
+	flusher.Flush()
+
+	writer := &imageJSONShellWriter{
+		writer:  c.Writer,
+		flusher: flusher,
+		stopCh:  make(chan struct{}),
+		doneCh:  make(chan struct{}),
+	}
+
+	go func() {
+		defer close(writer.doneCh)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-writer.stopCh:
+				return
+			case <-ticker.C:
+				_, _ = writer.writer.Write([]byte("."))
+				writer.flusher.Flush()
+			}
+		}
+	}()
+
+	return writer
+}
+
+func (w *imageJSONShellWriter) finishWithObject(obj []byte) error {
+	if w == nil {
+		return nil
+	}
+	close(w.stopCh)
+	<-w.doneCh
+	return appendObjectToJSONShell(w.writer, obj, w.flusher)
+}
+
+func (w *imageJSONShellWriter) finishWithError(errMsg *interfaces.ErrorMessage) error {
+	if w == nil {
+		return nil
+	}
+	close(w.stopCh)
+	<-w.doneCh
+	payload, err := buildImageShellErrorObject(errMsg)
+	if err != nil {
+		return err
+	}
+	return appendObjectToJSONShell(w.writer, payload, w.flusher)
+}
+
+func appendObjectToJSONShell(writer io.Writer, obj []byte, flusher http.Flusher) error {
+	trimmed := bytes.TrimSpace(obj)
+	if !json.Valid(trimmed) || len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {
+		return fmt.Errorf("invalid JSON object for shell append")
+	}
+	inner := bytes.TrimSpace(trimmed[1 : len(trimmed)-1])
+	if len(inner) == 0 {
+		_, err := writer.Write([]byte(`"}`))
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return err
+	}
+	if _, err := writer.Write([]byte(`",`)); err != nil {
+		return err
+	}
+	if _, err := writer.Write(inner); err != nil {
+		return err
+	}
+	_, err := writer.Write([]byte(`}`))
+	if flusher != nil {
+		flusher.Flush()
+	}
+	return err
+}
+
+func buildImageShellErrorObject(errMsg *interfaces.ErrorMessage) ([]byte, error) {
+	status := http.StatusBadGateway
+	message := "image generation failed"
+	if errMsg != nil {
+		if errMsg.StatusCode > 0 {
+			status = errMsg.StatusCode
+		}
+		if errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
+			message = errMsg.Error.Error()
+		}
+	}
+	body := handlers.BuildErrorResponseBody(status, message)
+	if !json.Valid(body) {
+		return nil, fmt.Errorf("invalid error response body")
+	}
+	return body, nil
 }
 
 func buildImagesAPIResponse(results []imageCallResult, createdAt int64, usageRaw []byte, firstMeta imageCallResult, responseFormat string) ([]byte, error) {
