@@ -55,6 +55,7 @@ const idempotencyKeyMetadataKey = "idempotency_key"
 const (
 	defaultStreamingKeepAliveSeconds = 0
 	defaultStreamingBootstrapRetries = 0
+	defaultNonStreamingKeepAliveSeconds = 5
 )
 
 const (
@@ -75,6 +76,8 @@ const (
 )
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:\-]+$`)
+
+var nonStreamingKeepAlivePayload = []byte(strings.Repeat(" ", 2048) + "\n")
 
 func clientAPIKeyFromGin(c *gin.Context) string {
 	if c == nil {
@@ -159,11 +162,16 @@ func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 }
 
 // NonStreamingKeepAliveInterval returns the keep-alive interval for non-streaming responses.
-// Returning 0 disables keep-alives (default when unset).
+// Returning a negative value disables keep-alives; 0 keeps the safe default enabled.
 func NonStreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
-	seconds := 0
+	seconds := defaultNonStreamingKeepAliveSeconds
 	if cfg != nil {
-		seconds = cfg.NonStreamKeepAliveInterval
+		switch {
+		case cfg.NonStreamKeepAliveInterval < 0:
+			return 0
+		case cfg.NonStreamKeepAliveInterval > 0:
+			seconds = cfg.NonStreamKeepAliveInterval
+		}
 	}
 	if seconds <= 0 {
 		return 0
@@ -578,6 +586,7 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	c.Header("X-Accel-Buffering", "no")
 
 	stopChan := make(chan struct{})
 	var stopOnce sync.Once
@@ -594,7 +603,7 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_, _ = c.Writer.Write([]byte("\n"))
+				_, _ = c.Writer.Write(nonStreamingKeepAlivePayload)
 				flusher.Flush()
 			}
 		}

@@ -26,8 +26,9 @@ type SDKConfig struct {
 	// Streaming configures server-side streaming behavior (keep-alives and safe bootstrap retries).
 	Streaming StreamingConfig `yaml:"streaming" json:"streaming"`
 
-	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
-	// <= 0 disables keep-alives. Value is in seconds.
+	// NonStreamKeepAliveInterval controls how often JSON-safe whitespace heartbeats
+	// are emitted for non-streaming responses. When unset or set to 0, a 5 second
+	// default is used. Set a negative value to disable keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
 }
 

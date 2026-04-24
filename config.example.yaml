@@ -137,7 +137,8 @@ routing:
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 
-# When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
+# When unset or set to 0, emit JSON-safe whitespace heartbeats every 5 seconds
+# for non-streaming responses. Set to -1 to disable.
 nonstream-keepalive-interval: 0
 
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
