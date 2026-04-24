@@ -137,3 +137,33 @@ func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 		t.Fatalf("unexpected error message: %q", msg)
 	}
 }
+
+func TestGetRequestDetails_CodexPreferredModelPrioritizesCodexProvider(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	now := time.Now().Unix()
+
+	modelRegistry.RegisterClient("test-request-details-openai-compat", "openai-compatibility", []*registry.ModelInfo{
+		{ID: "gpt-5.5", Created: now + 30},
+	})
+	modelRegistry.RegisterClient("test-request-details-codex", "codex", []*registry.ModelInfo{
+		{ID: "gpt-5.5", Created: now + 20},
+	})
+
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient("test-request-details-openai-compat")
+		modelRegistry.UnregisterClient("test-request-details-codex")
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	providers, model, errMsg := handler.getRequestDetails("gpt-5.5")
+	if errMsg != nil {
+		t.Fatalf("getRequestDetails() error = %v", errMsg)
+	}
+	wantProviders := []string{"codex", "openai-compatibility"}
+	if !reflect.DeepEqual(providers, wantProviders) {
+		t.Fatalf("getRequestDetails() providers = %v, want %v", providers, wantProviders)
+	}
+	if model != "gpt-5.5" {
+		t.Fatalf("getRequestDetails() model = %v, want %v", model, "gpt-5.5")
+	}
+}

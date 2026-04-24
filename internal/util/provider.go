@@ -54,10 +54,50 @@ func GetProviderName(modelName string) []string {
 	}
 
 	if len(providers) > 0 {
-		return providers
+		return preferProviderOrder(modelName, providers)
 	}
 
 	return providers
+}
+
+func preferProviderOrder(modelName string, providers []string) []string {
+	if len(providers) < 2 {
+		return providers
+	}
+	if !isCodexPreferredModel(modelName) {
+		return providers
+	}
+
+	codexIndex := -1
+	for i := range providers {
+		if strings.EqualFold(strings.TrimSpace(providers[i]), "codex") {
+			codexIndex = i
+			break
+		}
+	}
+	if codexIndex <= 0 {
+		return providers
+	}
+
+	ordered := make([]string, 0, len(providers))
+	ordered = append(ordered, providers[codexIndex])
+	ordered = append(ordered, providers[:codexIndex]...)
+	ordered = append(ordered, providers[codexIndex+1:]...)
+	return ordered
+}
+
+func isCodexPreferredModel(modelName string) bool {
+	switch strings.ToLower(strings.TrimSpace(modelName)) {
+	case "gpt-5.2-codex",
+		"gpt-5.3-codex",
+		"gpt-5.3-codex-spark",
+		"gpt-5.4",
+		"gpt-5.5",
+		"gpt-image-2":
+		return true
+	default:
+		return false
+	}
 }
 
 // ResolveAutoModel resolves the "auto" model name to an actual available model.
