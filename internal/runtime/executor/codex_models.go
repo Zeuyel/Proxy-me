@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -61,6 +62,7 @@ type codexOAuthAccess string
 const (
 	codexOAuthAccessDefault codexOAuthAccess = ""
 	codexOAuthAccessFree    codexOAuthAccess = "free"
+	codexOAuthAccessPaid    codexOAuthAccess = "paid"
 	codexOAuthAccessTeam    codexOAuthAccess = "team"
 )
 
@@ -69,6 +71,8 @@ func codexModelAllowedForAccessLevel(accessLevel codexOAuthAccess, modelID strin
 	case codexOAuthAccessFree:
 		_, blocked := codexFreeOAuthBlockedModelIDs[modelID]
 		return !blocked
+	case codexOAuthAccessPaid:
+		return true
 	case codexOAuthAccessTeam:
 		_, allowed := codexTeamOAuthAllowedModelIDs[modelID]
 		return allowed
@@ -94,16 +98,21 @@ func codexOAuthAccessLevel(auth *cliproxyauth.Auth) codexOAuthAccess {
 	if authKind == "api_key" || authKind == "apikey" {
 		return codexOAuthAccessDefault
 	}
-	if authKind == string(codexOAuthAccessTeam) {
-		return codexOAuthAccessTeam
+	if accessLevel, ok := codexOAuthAccessLevelFromValue(authKind); ok {
+		return accessLevel
 	}
-	if authKind == string(codexOAuthAccessFree) {
-		return codexOAuthAccessFree
+	if planType := codexPlanType(auth); planType != "" {
+		if accessLevel, ok := codexOAuthAccessLevelFromValue(planType); ok {
+			return accessLevel
+		}
 	}
 
 	for _, candidate := range []string{auth.FileName, auth.ID} {
 		if codexCredentialLooksTeam(candidate) {
 			return codexOAuthAccessTeam
+		}
+		if codexCredentialLooksPaid(candidate) {
+			return codexOAuthAccessPaid
 		}
 		if codexCredentialLooksFree(candidate) {
 			return codexOAuthAccessFree
@@ -112,12 +121,83 @@ func codexOAuthAccessLevel(auth *cliproxyauth.Auth) codexOAuthAccess {
 	return codexOAuthAccessDefault
 }
 
+func codexOAuthAccessLevelFromValue(value string) (codexOAuthAccess, bool) {
+	switch normalizeCodexAccessValue(value) {
+	case "free":
+		return codexOAuthAccessFree, true
+	case "plus", "pro", "business", "enterprise", "edu", "education", "paid":
+		return codexOAuthAccessPaid, true
+	case "team":
+		return codexOAuthAccessTeam, true
+	default:
+		return codexOAuthAccessDefault, false
+	}
+}
+
+func normalizeCodexAccessValue(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer("_", "-", " ", "-", "/", "-")
+	value = replacer.Replace(value)
+	for strings.Contains(value, "--") {
+		value = strings.ReplaceAll(value, "--", "-")
+	}
+	return strings.Trim(value, "-")
+}
+
+func codexPlanType(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if planType := normalizeCodexAccessValue(auth.Attributes["plan_type"]); planType != "" {
+			return planType
+		}
+	}
+	if auth.Metadata != nil {
+		if planType, ok := auth.Metadata["plan_type"].(string); ok {
+			if normalized := normalizeCodexAccessValue(planType); normalized != "" {
+				return normalized
+			}
+		}
+		for _, key := range []string{"id_token", "access_token", "token"} {
+			raw, ok := auth.Metadata[key].(string)
+			if !ok || strings.TrimSpace(raw) == "" {
+				continue
+			}
+			claims, err := codexauth.ParseJWTToken(strings.TrimSpace(raw))
+			if err != nil || claims == nil {
+				continue
+			}
+			if planType := normalizeCodexAccessValue(claims.CodexAuthInfo.ChatgptPlanType); planType != "" {
+				return planType
+			}
+		}
+	}
+	return ""
+}
+
 func codexCredentialLooksTeam(name string) bool {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "" {
 		return false
 	}
 	return strings.Contains(name, "-team.json") || strings.HasSuffix(name, "-team")
+}
+
+func codexCredentialLooksPaid(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return false
+	}
+	for _, marker := range []string{"-plus", "-pro", "-business", "-enterprise", "-edu", "-education", "-paid"} {
+		if strings.Contains(name, marker+".json") || strings.HasSuffix(name, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func codexCredentialLooksFree(name string) bool {

@@ -2,6 +2,8 @@ package executor
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -92,6 +94,54 @@ func TestFilterCodexModelsForAuth_PaidOAuthKeepsModels(t *testing.T) {
 	}
 }
 
+func TestFilterCodexModelsForAuth_FreeOAuthFromIDTokenRemovesRestrictedModels(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-free@example.com.json",
+		FileName: "codex-free@example.com.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"id_token": testCodexIDToken("free"),
+		},
+	}
+	models := []*registry.ModelInfo{
+		{ID: "gpt-5.2-codex"},
+		{ID: "gpt-5.5"},
+		{ID: "gpt-image-2"},
+	}
+
+	filtered := FilterCodexModelsForAuth(auth, models)
+	if len(filtered) != 2 {
+		t.Fatalf("expected free auth from id_token to keep 2 models, got %d", len(filtered))
+	}
+	if filtered[0].ID != "gpt-5.2-codex" {
+		t.Fatalf("expected gpt-5.2-codex to remain, got %q", filtered[0].ID)
+	}
+	if filtered[1].ID != "gpt-image-2" {
+		t.Fatalf("expected gpt-image-2 to remain, got %q", filtered[1].ID)
+	}
+}
+
+func TestFilterCodexModelsForAuth_PlusOAuthFromIDTokenKeepsModels(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-plus@example.com.json",
+		FileName: "codex-plus@example.com.json",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"id_token": testCodexIDToken("plus"),
+		},
+	}
+	models := []*registry.ModelInfo{
+		{ID: "gpt-5.2-codex"},
+		{ID: "gpt-5.5"},
+		{ID: "gpt-image-2"},
+	}
+
+	filtered := FilterCodexModelsForAuth(auth, models)
+	if len(filtered) != len(models) {
+		t.Fatalf("expected plus auth from id_token to keep all models, got %d", len(filtered))
+	}
+}
+
 func TestFilterCodexModelsForAuth_TeamOAuthKeepsOnlyUpstreamTeamModels(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		ID:       "codex-team@example.com-team.json",
@@ -118,4 +168,10 @@ func TestFilterCodexModelsForAuth_TeamOAuthKeepsOnlyUpstreamTeamModels(t *testin
 			t.Fatalf("unexpected team model at %d: got %#v want %q", i, model, want[i])
 		}
 	}
+}
+
+func testCodexIDToken(planType string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"https://api.openai.com/auth":{"chatgpt_plan_type":%q}}`, planType)))
+	return header + "." + payload + ".signature"
 }
