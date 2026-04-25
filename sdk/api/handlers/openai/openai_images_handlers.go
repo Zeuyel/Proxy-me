@@ -29,6 +29,7 @@ const (
 	defaultImagesMainModel = "gpt-5.4"
 	defaultImagesToolModel = "gpt-image-2"
 	imageJSONShellPrefix   = `{"_proxy_me_progress":"`
+	imageJSONShellBurstLen = 36 * 1024
 )
 
 type imageCallResult struct {
@@ -980,6 +981,7 @@ func startImageJSONShell(c *gin.Context, interval time.Duration) *imageJSONShell
 	c.Header("Content-Type", "application/json")
 	c.Header("X-Accel-Buffering", "no")
 	_, _ = c.Writer.Write([]byte(imageJSONShellPrefix))
+	_, _ = c.Writer.Write([]byte(strings.Repeat(".", imageJSONShellBurstLen)))
 	flusher.Flush()
 
 	writer := &imageJSONShellWriter{
