@@ -284,6 +284,8 @@ export function AuthFilesPage() {
   const [deletingAll, setDeletingAll] = useState(false);
   const [deleting401, setDeleting401] = useState(false);
   const [statusUpdating, setStatusUpdating] = useState<Record<string, boolean>>({});
+  const [cooldownResetting, setCooldownResetting] = useState<Record<string, boolean>>({});
+  const [resettingAllCooldowns, setResettingAllCooldowns] = useState(false);
   const [quotaRefreshingAll, setQuotaRefreshingAll] = useState(false);
   const [quotaRefreshingSingle, setQuotaRefreshingSingle] = useState<Record<string, boolean>>({});
   const [apiKeyAuthMap, setApiKeyAuthMap] = useState<Record<string, string[]>>({});
@@ -804,6 +806,10 @@ export function AuthFilesPage() {
     () => files.some((item) => supportsInlineQuota(item)),
     [files, supportsInlineQuota]
   );
+  const hasCooldownTargets = useMemo(
+    () => files.some((item) => isCooldownDisabled(item)),
+    [files]
+  );
   const getQuotaStateForFile = useCallback((item: AuthFileItem): QuotaStatusState | undefined => {
     const key = String(item.name || '').trim();
     if (!key) return undefined;
@@ -1251,6 +1257,53 @@ export function AuthFilesPage() {
         delete next[name];
         return next;
       });
+    }
+  };
+
+  const handleResetCooldown = async (item: AuthFileItem) => {
+    const name = String(item.name ?? '').trim();
+    if (!name) return;
+
+    setCooldownResetting((prev) => ({ ...prev, [name]: true }));
+    try {
+      const res = await authFilesApi.resetCooldown(name, true);
+      await loadFiles({ silent: true });
+      showNotification(
+        t('auth_files.reset_cooldown_success', {
+          name,
+          count: Number(res?.reset ?? 0),
+        }),
+        'success'
+      );
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : '';
+      showNotification(`${t('notification.update_failed')}: ${errorMessage}`, 'error');
+    } finally {
+      setCooldownResetting((prev) => {
+        if (!prev[name]) return prev;
+        const next = { ...prev };
+        delete next[name];
+        return next;
+      });
+    }
+  };
+
+  const handleResetAllCooldowns = async () => {
+    setResettingAllCooldowns(true);
+    try {
+      const res = await authFilesApi.resetAllCooldowns(true);
+      await loadFiles({ silent: true });
+      showNotification(
+        t('auth_files.reset_all_cooldowns_success', {
+          count: Number(res?.reset ?? 0),
+        }),
+        'success'
+      );
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : '';
+      showNotification(`${t('notification.update_failed')}: ${errorMessage}`, 'error');
+    } finally {
+      setResettingAllCooldowns(false);
     }
   };
 
@@ -1897,6 +1950,22 @@ export function AuthFilesPage() {
               >
                 <IconDownload className={styles.actionIcon} size={16} />
               </Button>
+              {cooldownActive && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void handleResetCooldown(item)}
+                  className={styles.iconButton}
+                  title={t('auth_files.reset_cooldown_button')}
+                  disabled={disableControls || cooldownResetting[item.name] === true}
+                >
+                  {cooldownResetting[item.name] === true ? (
+                    <LoadingSpinner size={14} />
+                  ) : (
+                    <IconRefreshCw className={styles.actionIcon} size={16} />
+                  )}
+                </Button>
+              )}
               <Button
                 variant="secondary"
                 size="sm"
@@ -1989,6 +2058,16 @@ export function AuthFilesPage() {
               title={t('auth_files.refresh_quota_button')}
             >
               {t('auth_files.refresh_quota_button')}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void handleResetAllCooldowns()}
+              disabled={disableControls || resettingAllCooldowns || !hasCooldownTargets}
+              loading={resettingAllCooldowns}
+              title={t('auth_files.reset_all_cooldowns_button')}
+            >
+              {t('auth_files.reset_all_cooldowns_button')}
             </Button>
             <Button
               size="sm"

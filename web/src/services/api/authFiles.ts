@@ -8,6 +8,12 @@ import type { OAuthModelMappingEntry } from '@/types';
 
 type StatusError = { status?: number };
 type AuthFileStatusResponse = { status: string; disabled: boolean };
+type AuthFileCooldownResetResponse = {
+  status: string;
+  reset: number;
+  include_quota?: boolean;
+  targets?: string[];
+};
 
 const getStatusCode = (err: unknown): number | undefined => {
   if (!err || typeof err !== 'object') return undefined;
@@ -109,6 +115,18 @@ export const authFilesApi = {
 
   setStatus: (name: string, disabled: boolean) =>
     apiClient.patch<AuthFileStatusResponse>('/auth-files/status', { name, disabled }),
+
+  resetCooldown: (name: string, includeQuota: boolean = true) =>
+    apiClient.post<AuthFileCooldownResetResponse>('/auth-files/reset-cooldown', {
+      name,
+      include_quota: includeQuota,
+    }),
+
+  resetAllCooldowns: (includeQuota: boolean = true) =>
+    apiClient.post<AuthFileCooldownResetResponse>('/auth-files/reset-cooldown', {
+      all: true,
+      include_quota: includeQuota,
+    }),
 
   upload: (file: File) => {
     const formData = new FormData();

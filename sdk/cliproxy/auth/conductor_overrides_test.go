@@ -2,9 +2,36 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
+
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
+
+type stubProviderExecutor struct {
+	id string
+}
+
+func (s stubProviderExecutor) Identifier() string { return s.id }
+
+func (s stubProviderExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (s stubProviderExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+	return nil, nil
+}
+
+func (s stubProviderExecutor) Refresh(context.Context, *Auth) (*Auth, error) { return nil, nil }
+
+func (s stubProviderExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (s stubProviderExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
 
 func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testing.T) {
 	m := NewManager(nil, nil, nil)
@@ -241,5 +268,116 @@ func TestManager_SyncQuotaProbe_SetsQuotaCooldown(t *testing.T) {
 	}
 	if state.Status != StatusError {
 		t.Fatalf("expected model status error, got %s", state.Status)
+	}
+}
+
+func TestManager_ResetCooldown_ClearsTransientAndQuotaState(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	now := time.Now()
+	transientUntil := now.Add(2 * time.Minute)
+	quotaUntil := now.Add(30 * time.Minute)
+
+	auth := &Auth{
+		ID:             "auth-1",
+		Provider:       "claude",
+		Status:         StatusError,
+		StatusMessage:  "transient upstream error",
+		Unavailable:    true,
+		NextRetryAfter: transientUntil,
+		ModelStates: map[string]*ModelState{
+			"transient-model": {
+				Status:         StatusError,
+				StatusMessage:  "transient upstream error",
+				Unavailable:    true,
+				NextRetryAfter: transientUntil,
+			},
+			"quota-model": {
+				Status:         StatusError,
+				StatusMessage:  "quota exhausted",
+				Unavailable:    true,
+				NextRetryAfter: quotaUntil,
+				Quota: QuotaState{
+					Exceeded:      true,
+					Reason:        "codex_5h_limit",
+					NextRecoverAt: quotaUntil,
+				},
+			},
+		},
+	}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	if _, changed := m.ResetCooldown(context.Background(), auth.ID, CooldownResetOptions{
+		IncludeQuota:  false,
+		TransientOnly: true,
+	}); !changed {
+		t.Fatalf("expected transient reset to change auth")
+	}
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to exist")
+	}
+	if updated.ModelStates["transient-model"].Unavailable {
+		t.Fatalf("expected transient model cooldown to be cleared")
+	}
+	if !updated.ModelStates["quota-model"].Quota.Exceeded {
+		t.Fatalf("expected quota model cooldown to remain")
+	}
+
+	if _, changed := m.ResetCooldown(context.Background(), auth.ID, CooldownResetOptions{
+		IncludeQuota: true,
+	}); !changed {
+		t.Fatalf("expected full reset to change auth")
+	}
+
+	updated, ok = m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to exist after full reset")
+	}
+	if updated.Quota.Exceeded {
+		t.Fatalf("expected auth quota cooldown to be cleared")
+	}
+	if updated.ModelStates["quota-model"].Quota.Exceeded {
+		t.Fatalf("expected quota model cooldown to be cleared")
+	}
+	if updated.Status != StatusActive {
+		t.Fatalf("expected auth status active after full reset, got %s", updated.Status)
+	}
+}
+
+func TestManager_PickNext_ReopensTransientCooldownWhenAllBlocked(t *testing.T) {
+	m := NewManager(nil, &FillFirstSelector{}, NoopHook{})
+	m.SetRetryConfig(0, 30*time.Second)
+	m.RegisterExecutor(stubProviderExecutor{id: "claude"})
+
+	auth := &Auth{
+		ID:             "auth-1",
+		Provider:       "claude",
+		Status:         StatusError,
+		StatusMessage:  "transient upstream error",
+		Unavailable:    true,
+		NextRetryAfter: time.Now().Add(2 * time.Minute),
+		Metadata:       map[string]any{"token": "x"},
+	}
+	if _, err := m.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	selected, _, err := m.pickNext(context.Background(), "claude", "", cliproxyexecutor.Options{}, map[string]struct{}{})
+	if err != nil {
+		t.Fatalf("expected fallback reopen to recover auth, got error: %v", err)
+	}
+	if selected == nil || selected.ID != auth.ID {
+		t.Fatalf("expected reopened auth to be selected")
+	}
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to exist after pickNext")
+	}
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected transient cooldown to be cleared after fallback reopen")
 	}
 }

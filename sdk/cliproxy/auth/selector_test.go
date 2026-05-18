@@ -120,6 +120,49 @@ func TestFillFirstSelectorPick_PriorityFallbackCooldown(t *testing.T) {
 	}
 }
 
+func TestGetAvailableAuths_ReturnsCooldownErrorForTemporaryBlocks(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	model := "test-model"
+	auths := []*Auth{
+		{
+			ID: "a",
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: now.Add(2 * time.Minute),
+					StatusMessage:  "transient upstream error",
+				},
+			},
+		},
+		{
+			ID: "b",
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: now.Add(30 * time.Second),
+					StatusMessage:  "payment_required",
+				},
+			},
+		},
+	}
+
+	_, err := getAvailableAuths(auths, "claude", model, now)
+	if err == nil {
+		t.Fatalf("expected cooldown error")
+	}
+	var cooldownErr *modelCooldownError
+	if !errors.As(err, &cooldownErr) {
+		t.Fatalf("expected modelCooldownError, got %T: %v", err, err)
+	}
+	if cooldownErr.resetIn <= 0 || cooldownErr.resetIn > time.Minute {
+		t.Fatalf("expected earliest retry window to be used, got %v", cooldownErr.resetIn)
+	}
+}
+
 func TestRoundRobinSelectorPick_Concurrent(t *testing.T) {
 	selector := &RoundRobinSelector{}
 	auths := []*Auth{

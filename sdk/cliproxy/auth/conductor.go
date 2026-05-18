@@ -91,6 +91,16 @@ type Result struct {
 	Error *Error
 }
 
+// CooldownResetOptions controls how runtime cooldown state should be cleared.
+type CooldownResetOptions struct {
+	// Model limits reset to a specific model state when non-empty.
+	Model string
+	// IncludeQuota clears quota-derived cooldown state in addition to transient blocks.
+	IncludeQuota bool
+	// TransientOnly restricts reset to transient upstream errors only.
+	TransientOnly bool
+}
+
 // Selector chooses an auth candidate for execution.
 type Selector interface {
 	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
@@ -1561,6 +1571,180 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.UpdatedAt = now
 }
 
+func isTransientCooldownMessage(message string) bool {
+	return strings.EqualFold(strings.TrimSpace(message), "transient upstream error")
+}
+
+func shouldResetModelCooldown(state *ModelState, now time.Time, opts CooldownResetOptions) bool {
+	if state == nil || state.Status == StatusDisabled {
+		return false
+	}
+	if state.Quota.Exceeded {
+		return opts.IncludeQuota && !opts.TransientOnly
+	}
+	if !state.Unavailable || state.NextRetryAfter.IsZero() || !state.NextRetryAfter.After(now) {
+		return false
+	}
+	if opts.TransientOnly {
+		return isTransientCooldownMessage(state.StatusMessage)
+	}
+	return true
+}
+
+func shouldResetAuthCooldown(auth *Auth, now time.Time, opts CooldownResetOptions) bool {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+		return false
+	}
+	if auth.Quota.Exceeded {
+		return opts.IncludeQuota && !opts.TransientOnly
+	}
+	if !auth.Unavailable || auth.NextRetryAfter.IsZero() || !auth.NextRetryAfter.After(now) {
+		return false
+	}
+	if opts.TransientOnly {
+		return isTransientCooldownMessage(auth.StatusMessage)
+	}
+	return true
+}
+
+// ResetCooldown clears runtime cooldown state for the selected auth.
+// It preserves manual disabled status and only touches in-memory runtime blocks.
+func (m *Manager) ResetCooldown(ctx context.Context, authID string, opts CooldownResetOptions) (*Auth, bool) {
+	if m == nil {
+		return nil, false
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return nil, false
+	}
+	now := time.Now()
+	modelKey := strings.TrimSpace(opts.Model)
+	if modelKey != "" {
+		parsed := thinking.ParseSuffix(modelKey)
+		if parsed.ModelName != "" {
+			modelKey = strings.TrimSpace(parsed.ModelName)
+		}
+	}
+
+	clearQuotaModels := make([]string, 0, 4)
+	resumeModels := make([]string, 0, 4)
+	var authClone *Auth
+	changed := false
+
+	m.mu.Lock()
+	auth, ok := m.auths[authID]
+	if !ok || auth == nil {
+		m.mu.Unlock()
+		return nil, false
+	}
+
+	resetModel := func(model string, state *ModelState) {
+		if !shouldResetModelCooldown(state, now, opts) {
+			return
+		}
+		if state.Quota.Exceeded {
+			clearQuotaModels = append(clearQuotaModels, model)
+		}
+		resetModelState(state, now)
+		resumeModels = append(resumeModels, model)
+		changed = true
+	}
+
+	if modelKey != "" {
+		if state := auth.ModelStates[modelKey]; state != nil {
+			resetModel(modelKey, state)
+		}
+	} else {
+		for model, state := range auth.ModelStates {
+			resetModel(model, state)
+		}
+	}
+
+	if shouldResetAuthCooldown(auth, now, opts) {
+		clearAuthStateOnSuccess(auth, now)
+		changed = true
+	}
+
+	if changed {
+		if len(auth.ModelStates) > 0 {
+			updateAggregatedAvailability(auth, now)
+		}
+		if !(auth.Disabled || auth.Status == StatusDisabled) {
+			if !hasModelError(auth, now) && !auth.Unavailable && !auth.Quota.Exceeded {
+				auth.Status = StatusActive
+				auth.StatusMessage = ""
+				auth.LastError = nil
+			} else {
+				auth.Status = StatusError
+			}
+		}
+		auth.UpdatedAt = now
+		_ = m.persist(ctx, auth)
+		authClone = auth.Clone()
+	}
+	m.mu.Unlock()
+
+	if !changed {
+		return nil, false
+	}
+
+	registryRef := registry.GetGlobalRegistry()
+	for _, model := range clearQuotaModels {
+		registryRef.ClearModelQuotaExceeded(authID, model)
+	}
+	for _, model := range resumeModels {
+		registryRef.ResumeClientModel(authID, model)
+	}
+	if authClone != nil {
+		m.hook.OnAuthUpdated(ctx, authClone)
+	}
+	return authClone, true
+}
+
+func (m *Manager) shouldFallbackReopenCooldown(err error) bool {
+	if err == nil {
+		return false
+	}
+	var cooldownErr *modelCooldownError
+	if !errors.As(err, &cooldownErr) || cooldownErr == nil {
+		return false
+	}
+	_, maxWait := m.retrySettings()
+	if maxWait < 0 {
+		maxWait = 0
+	}
+	if maxWait <= 0 {
+		return cooldownErr.resetIn > 0
+	}
+	return cooldownErr.resetIn > maxWait
+}
+
+func (m *Manager) reopenTransientCooldowns(ctx context.Context, auths []*Auth, model string) bool {
+	if m == nil || len(auths) == 0 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(auths))
+	reopened := false
+	for i := range auths {
+		auth := auths[i]
+		if auth == nil || auth.ID == "" {
+			continue
+		}
+		if _, ok := seen[auth.ID]; ok {
+			continue
+		}
+		seen[auth.ID] = struct{}{}
+		if _, changed := m.ResetCooldown(ctx, auth.ID, CooldownResetOptions{
+			Model:         model,
+			IncludeQuota:  false,
+			TransientOnly: true,
+		}); changed {
+			reopened = true
+		}
+	}
+	return reopened
+}
+
 func cloneError(err *Error) *Error {
 	if err == nil {
 		return nil
@@ -1806,17 +1990,19 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	m.mu.RUnlock()
+
 	selected, errPick := m.selector.Pick(ctx, provider, model, opts, candidates)
+	if errPick != nil && m.shouldFallbackReopenCooldown(errPick) && m.reopenTransientCooldowns(ctx, candidates, model) {
+		selected, errPick = m.selector.Pick(ctx, provider, model, opts, candidates)
+	}
 	if errPick != nil {
-		m.mu.RUnlock()
 		return nil, nil, errPick
 	}
 	if selected == nil {
-		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
 	authCopy := selected.Clone()
-	m.mu.RUnlock()
 	if !selected.indexAssigned {
 		m.mu.Lock()
 		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
@@ -1899,16 +2085,20 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	m.mu.RUnlock()
+
 	selected, errPick := m.selector.Pick(ctx, "mixed", model, opts, candidates)
+	if errPick != nil && m.shouldFallbackReopenCooldown(errPick) && m.reopenTransientCooldowns(ctx, candidates, model) {
+		selected, errPick = m.selector.Pick(ctx, "mixed", model, opts, candidates)
+	}
 	if errPick != nil {
-		m.mu.RUnlock()
 		return nil, nil, "", errPick
 	}
 	if selected == nil {
-		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
 	providerKey := strings.TrimSpace(strings.ToLower(selected.Provider))
+	m.mu.RLock()
 	executor, okExecutor := m.executors[providerKey]
 	if !okExecutor {
 		m.mu.RUnlock()

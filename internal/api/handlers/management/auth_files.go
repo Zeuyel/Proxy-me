@@ -126,6 +126,20 @@ func resolveAuthCooldown(auth *coreauth.Auth, now time.Time) (bool, string, time
 		reason string
 		until  time.Time
 	)
+	considerTemporary := func(next time.Time, candidateReason string) {
+		if next.IsZero() || !next.After(now) {
+			return
+		}
+		candidateReason = strings.TrimSpace(candidateReason)
+		if candidateReason == "" {
+			candidateReason = "temporary_unavailable"
+		}
+		if !active || next.Before(until) {
+			active = true
+			reason = candidateReason
+			until = next
+		}
+	}
 	consider := func(quota coreauth.QuotaState) {
 		if !quota.Exceeded || quota.NextRecoverAt.IsZero() || !quota.NextRecoverAt.After(now) {
 			return
@@ -140,11 +154,13 @@ func resolveAuthCooldown(auth *coreauth.Auth, now time.Time) (bool, string, time
 			until = quota.NextRecoverAt
 		}
 	}
+	considerTemporary(auth.NextRetryAfter, "")
 	consider(auth.Quota)
 	for _, state := range auth.ModelStates {
 		if state == nil {
 			continue
 		}
+		considerTemporary(state.NextRetryAfter, state.StatusMessage)
 		consider(state.Quota)
 	}
 	return active, reason, until
@@ -1026,6 +1042,94 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
+}
+
+// ResetAuthFileCooldown clears runtime cooldown state for one or more auth files.
+func (h *Handler) ResetAuthFileCooldown(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req struct {
+		Name         string `json:"name"`
+		AuthIndex    string `json:"auth_index"`
+		ID           string `json:"id"`
+		All          bool   `json:"all"`
+		IncludeQuota *bool  `json:"include_quota"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	includeQuota := true
+	if req.IncludeQuota != nil {
+		includeQuota = *req.IncludeQuota
+	}
+
+	targets := make([]*coreauth.Auth, 0)
+	if req.All {
+		targets = h.authManager.List()
+	} else {
+		name := strings.TrimSpace(req.Name)
+		authID := strings.TrimSpace(req.ID)
+		authIndex := strings.TrimSpace(req.AuthIndex)
+
+		var target *coreauth.Auth
+		switch {
+		case authID != "":
+			if auth, ok := h.authManager.GetByID(authID); ok {
+				target = auth
+			}
+		case authIndex != "":
+			target = h.authByIndex(authIndex)
+		case name != "":
+			if auth, ok := h.authManager.GetByID(name); ok {
+				target = auth
+			} else {
+				auths := h.authManager.List()
+				for _, auth := range auths {
+					if auth != nil && auth.FileName == name {
+						target = auth
+						break
+					}
+				}
+			}
+		}
+
+		if target == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+			return
+		}
+		targets = append(targets, target)
+	}
+
+	ctx := c.Request.Context()
+	resetCount := 0
+	targetNames := make([]string, 0, len(targets))
+	for _, auth := range targets {
+		if auth == nil {
+			continue
+		}
+		if _, changed := h.authManager.ResetCooldown(ctx, auth.ID, coreauth.CooldownResetOptions{
+			IncludeQuota: includeQuota,
+		}); changed {
+			resetCount++
+			name := strings.TrimSpace(auth.FileName)
+			if name == "" {
+				name = auth.ID
+			}
+			targetNames = append(targetNames, name)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":        "ok",
+		"reset":         resetCount,
+		"include_quota": includeQuota,
+		"targets":       targetNames,
+	})
 }
 
 func (h *Handler) disableAuth(ctx context.Context, id string) {
