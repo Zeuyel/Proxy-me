@@ -13,6 +13,7 @@ import (
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -42,6 +43,41 @@ func newTestServer(t *testing.T) *Server {
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath)
+}
+
+func TestManagementRoutesEnabledWithUploadKeyOnly(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	uploadKey, err := bcrypt.GenerateFromPassword([]byte("upload-secret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("hash upload key: %v", err)
+	}
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeys: []string{"test-key"},
+		},
+		Port:    0,
+		AuthDir: tmpDir,
+		RemoteManagement: proxyconfig.RemoteManagement{
+			AllowRemote:         true,
+			UploadKey:           string(uploadKey),
+			DisableControlPanel: true,
+		},
+	}
+	server := NewServer(cfg, auth.NewManager(nil, nil, nil), sdkaccess.NewManager(), filepath.Join(tmpDir, "config.yaml"))
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	req.Header.Set("X-Auth-Upload-Key", "upload-secret")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code == http.StatusNotFound {
+		t.Fatalf("management routes were not registered with upload-key only")
+	}
+	if rr.Code == http.StatusOK {
+		t.Fatalf("upload-only key unexpectedly allowed non-upload route")
+	}
 }
 
 func TestAmpProviderModelRoutes(t *testing.T) {

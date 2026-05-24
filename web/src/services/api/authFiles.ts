@@ -8,6 +8,16 @@ import type { OAuthModelMappingEntry } from '@/types';
 
 type StatusError = { status?: number };
 type AuthFileStatusResponse = { status: string; disabled: boolean };
+type AuthFileMetadataResponse = {
+  status: string;
+  name: string;
+  metadata?: {
+    imported_at?: string;
+    display_name?: string;
+    tags?: string[];
+  };
+};
+type AuthFileRenameResponse = { status: string; name: string; old_name?: string };
 type AuthFileCooldownResetResponse = {
   status: string;
   reset: number;
@@ -133,6 +143,21 @@ export const authFilesApi = {
     formData.append('file', file, file.name);
     return apiClient.postForm('/auth-files', formData);
   },
+
+  uploadText: (name: string, text: string) =>
+    apiClient.post('/auth-files', text, {
+      params: { name },
+      headers: { 'Content-Type': 'application/json' },
+    }),
+
+  updateMetadata: (name: string, payload: { display_name?: string; tags?: string[] }) =>
+    apiClient.patch<AuthFileMetadataResponse>('/auth-files/metadata', { name, ...payload }),
+
+  rename: (name: string, newName: string) =>
+    apiClient.patch<AuthFileRenameResponse>('/auth-files/rename', {
+      name,
+      new_name: newName,
+    }),
 
   deleteFile: (name: string) => apiClient.delete(`/auth-files?name=${encodeURIComponent(name)}`),
 

@@ -21,6 +21,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+const authFileUploadKeyHeader = "X-Auth-Upload-Key"
+
 type attemptInfo struct {
 	count        int
 	blockedUntil time.Time
@@ -129,7 +131,7 @@ func (h *Handler) SetLogDirectory(dir string) {
 }
 
 // Middleware enforces access control for management endpoints.
-// All requests (local and remote) require a valid management key.
+// A full management key can access every route; the upload key can only access POST /auth-files.
 // Additionally, remote access requires allow-remote-management=true.
 func (h *Handler) Middleware() gin.HandlerFunc {
 	const maxFailures = 5
@@ -146,15 +148,23 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		var (
 			allowRemote bool
 			secretHash  string
+			uploadHash  string
 		)
 		if cfg != nil {
 			allowRemote = cfg.RemoteManagement.AllowRemote
 			secretHash = cfg.RemoteManagement.SecretKey
+			uploadHash = cfg.RemoteManagement.UploadKey
 		}
 		if h.allowRemoteOverride {
 			allowRemote = true
 		}
 		envSecret := h.envSecret
+		uploadRequest := isAuthFileUploadRequest(c)
+		providedMgmt := extractManagementKey(c)
+		providedUpload := strings.TrimSpace(c.GetHeader(authFileUploadKeyHeader))
+		if providedUpload == "" {
+			providedUpload = strings.TrimSpace(c.GetHeader("X-Upload-Key"))
+		}
 
 		fail := func() {}
 		if !localClient {
@@ -196,56 +206,94 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 				h.attemptsMu.Unlock()
 			}
 		}
-		if secretHash == "" && envSecret == "" {
+		if secretHash == "" && envSecret == "" && !(uploadRequest && uploadHash != "") {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "remote management key not set"})
 			return
 		}
 
-		// Accept either Authorization: Bearer <key> or X-Management-Key
-		var provided string
-		if ah := c.GetHeader("Authorization"); ah != "" {
-			parts := strings.SplitN(ah, " ", 2)
-			if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-				provided = parts[1]
-			} else {
-				provided = ah
-			}
-		}
-		if provided == "" {
-			provided = c.GetHeader("X-Management-Key")
-		}
-
-		if provided == "" {
+		if providedMgmt == "" && providedUpload == "" {
 			if !localClient {
 				fail()
 			}
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing management key"})
+			if uploadRequest && uploadHash != "" {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing management key or upload key"})
+			} else if uploadRequest {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing management key"})
+			} else {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing management key"})
+			}
 			return
 		}
 
-		if localClient {
+		if localClient && providedMgmt != "" {
 			if lp := h.localPassword; lp != "" {
-				if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
+				if subtle.ConstantTimeCompare([]byte(providedMgmt), []byte(lp)) == 1 {
+					h.clearFailedAttempt(clientIP)
 					c.Next()
 					return
 				}
 			}
 		}
 
-		if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
-			if !localClient {
-				h.attemptsMu.Lock()
-				if ai := h.failedAttempts[clientIP]; ai != nil {
-					ai.count = 0
-					ai.blockedUntil = time.Time{}
+		if providedMgmt != "" {
+			if envSecret != "" && subtle.ConstantTimeCompare([]byte(providedMgmt), []byte(envSecret)) == 1 {
+				if !localClient {
+					h.clearFailedAttempt(clientIP)
 				}
-				h.attemptsMu.Unlock()
+				c.Next()
+				return
 			}
-			c.Next()
+
+			if secretHash != "" && bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(providedMgmt)) == nil {
+				if !localClient {
+					h.clearFailedAttempt(clientIP)
+				}
+				c.Next()
+				return
+			}
+		}
+
+		if uploadRequest && uploadHash != "" {
+			if providedUpload != "" && bcrypt.CompareHashAndPassword([]byte(uploadHash), []byte(providedUpload)) == nil {
+				if !localClient {
+					h.clearFailedAttempt(clientIP)
+				}
+				c.Next()
+				return
+			}
+			if providedMgmt != "" && bcrypt.CompareHashAndPassword([]byte(uploadHash), []byte(providedMgmt)) == nil {
+				if !localClient {
+					h.clearFailedAttempt(clientIP)
+				}
+				c.Next()
+				return
+			}
+		}
+
+		if uploadRequest && providedUpload != "" {
+			if providedMgmt != "" && (secretHash != "" || envSecret != "") {
+				if !localClient {
+					fail()
+				}
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid management key"})
+				return
+			}
+			if !localClient {
+				fail()
+			}
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid upload key"})
 			return
 		}
 
-		if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
+		if uploadRequest && providedMgmt != "" && uploadHash != "" {
+			if !localClient {
+				fail()
+			}
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid management key"})
+			return
+		}
+
+		if providedMgmt == "" {
 			if !localClient {
 				fail()
 			}
@@ -254,16 +302,54 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		}
 
 		if !localClient {
-			h.attemptsMu.Lock()
-			if ai := h.failedAttempts[clientIP]; ai != nil {
-				ai.count = 0
-				ai.blockedUntil = time.Time{}
-			}
-			h.attemptsMu.Unlock()
+			fail()
 		}
-
-		c.Next()
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid management key"})
 	}
+}
+
+func (h *Handler) clearFailedAttempt(clientIP string) {
+	if clientIP == "" {
+		return
+	}
+	h.attemptsMu.Lock()
+	if ai := h.failedAttempts[clientIP]; ai != nil {
+		ai.count = 0
+		ai.blockedUntil = time.Time{}
+		ai.lastActivity = time.Now()
+	}
+	h.attemptsMu.Unlock()
+}
+
+func extractManagementKey(c *gin.Context) string {
+	var provided string
+	if ah := c.GetHeader("Authorization"); ah != "" {
+		parts := strings.SplitN(ah, " ", 2)
+		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
+			provided = parts[1]
+		} else {
+			provided = ah
+		}
+	}
+	if provided == "" {
+		provided = c.GetHeader("X-Management-Key")
+	}
+	return strings.TrimSpace(provided)
+}
+
+func isAuthFileUploadRequest(c *gin.Context) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	if c.Request.Method != http.MethodPost {
+		return false
+	}
+	fullPath := strings.TrimSuffix(c.FullPath(), "/")
+	if fullPath != "" {
+		return strings.HasSuffix(fullPath, "/auth-files")
+	}
+	path := strings.TrimSuffix(c.Request.URL.Path, "/")
+	return strings.HasSuffix(path, "/auth-files")
 }
 
 // persist saves the current in-memory config to disk.

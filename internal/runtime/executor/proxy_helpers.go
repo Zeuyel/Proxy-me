@@ -92,6 +92,7 @@ func newProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 // Returns:
 //   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
 func buildProxyTransport(proxyURL string) *http.Transport {
+	proxyURL = cliproxyauth.FirstUsableProxyURL(proxyURL, time.Now())
 	if proxyURL == "" {
 		return nil
 	}

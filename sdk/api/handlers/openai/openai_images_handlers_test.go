@@ -2,11 +2,55 @@ package openai
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"github.com/tidwall/gjson"
 )
+
+type blockingImageStreamExecutor struct {
+	started chan struct{}
+}
+
+func (e *blockingImageStreamExecutor) Identifier() string { return "codex" }
+
+func (e *blockingImageStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *blockingImageStreamExecutor) ExecuteStream(ctx context.Context, _ *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (<-chan coreexecutor.StreamChunk, error) {
+	select {
+	case <-e.started:
+	default:
+		close(e.started)
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (e *blockingImageStreamExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *blockingImageStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *blockingImageStreamExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
 
 func TestBuildImagesResponsesRequestUsesNativeImageGenerationTool(t *testing.T) {
 	req := buildImagesResponsesRequest("draw a cat", nil, []byte(`{"type":"image_generation","action":"generate","model":"gpt-image-2","output_format":"png"}`))
@@ -25,6 +69,97 @@ func TestBuildImagesResponsesRequestUsesNativeImageGenerationTool(t *testing.T) 
 	}
 	if got := gjson.GetBytes(req, "tools.0.output_format").String(); got != "png" {
 		t.Fatalf("tools.0.output_format = %q, want png", got)
+	}
+}
+
+func TestBuildImagesResponsesRequestNormalizesGenericImageDataURL(t *testing.T) {
+	pngHeader := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	raw := "data:image;base64," + base64.StdEncoding.EncodeToString(pngHeader)
+
+	req := buildImagesResponsesRequest("edit this", []string{raw}, []byte(`{"type":"image_generation","action":"edit","model":"gpt-image-2","output_format":"png"}`))
+
+	if got := gjson.GetBytes(req, "input.0.content.1.image_url").String(); got != "data:image/png;base64,"+base64.StdEncoding.EncodeToString(pngHeader) {
+		t.Fatalf("input image_url = %q, want normalized image/png data url", got)
+	}
+}
+
+func TestBuildImagesResponsesRequestPropagatesModelPrefix(t *testing.T) {
+	req := buildImagesResponsesRequest("draw a cat", nil, []byte(`{"type":"image_generation","action":"generate","model":"team-a/gpt-image-2"}`))
+
+	if got := gjson.GetBytes(req, "model").String(); got != "team-a/gpt-5.4" {
+		t.Fatalf("model = %q, want team-a/gpt-5.4", got)
+	}
+}
+
+func TestBuildImageShellErrorObjectIsImagesAPICompatible(t *testing.T) {
+	out, err := buildImageShellErrorObject(&interfaces.ErrorMessage{
+		StatusCode: 502,
+		Error:      context.Canceled,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "data"); !got.IsArray() {
+		t.Fatalf("data must be an array for OpenAI Images compatibility; out=%s", out)
+	}
+	if got := gjson.GetBytes(out, "error.message").String(); got == "" {
+		t.Fatalf("error.message is empty; out=%s", out)
+	}
+}
+
+func TestCollectImagesFromResponsesStartsShellWhileStreamDispatchBlocks(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &blockingImageStreamExecutor{started: make(chan struct{})}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "image-shell-auth", Provider: "codex", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: defaultImagesMainModel}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{NonStreamKeepAliveInterval: 1}, manager)
+	h := NewOpenAIAPIHandler(base)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	reqCtx, cancel := context.WithCancel(context.Background())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil).WithContext(reqCtx)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.collectImagesFromResponses(c, []byte(`{"stream":true}`), "b64_json")
+	}()
+
+	select {
+	case <-executor.started:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatalf("stream executor did not start")
+	}
+
+	deadline := time.After(3 * time.Second)
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatalf("expected json shell prefix before blocked stream dispatch returns, got body head %q", recorder.Body.String())
+		case <-tick.C:
+			if strings.Contains(recorder.Body.String(), "_proxy_me_progress") {
+				cancel()
+				<-done
+				return
+			}
+		}
 	}
 }
 

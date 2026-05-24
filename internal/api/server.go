@@ -291,7 +291,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	// Register management routes when configuration or environment secrets are available.
-	hasManagementSecret := cfg.RemoteManagement.SecretKey != "" || envManagementSecret
+	hasManagementSecret := cfg.RemoteManagement.SecretKey != "" || cfg.RemoteManagement.UploadKey != "" || envManagementSecret
 	s.managementRoutesEnabled.Store(hasManagementSecret)
 	if hasManagementSecret {
 		s.registerManagementRoutes()
@@ -668,6 +668,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
+		mgmt.PATCH("/auth-files/metadata", s.mgmt.PatchAuthFileMetadata)
+		mgmt.PATCH("/auth-files/rename", s.mgmt.RenameAuthFile)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
 		mgmt.POST("/auth-files/reset-cooldown", s.mgmt.ResetAuthFileCooldown)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
@@ -967,9 +969,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	prevSecretEmpty := true
 	if oldCfg != nil {
-		prevSecretEmpty = oldCfg.RemoteManagement.SecretKey == ""
+		prevSecretEmpty = oldCfg.RemoteManagement.SecretKey == "" && oldCfg.RemoteManagement.UploadKey == ""
 	}
-	newSecretEmpty := cfg.RemoteManagement.SecretKey == ""
+	newSecretEmpty := cfg.RemoteManagement.SecretKey == "" && cfg.RemoteManagement.UploadKey == ""
 	if s.envManagementSecret {
 		s.registerManagementRoutes()
 		if s.managementRoutesEnabled.CompareAndSwap(false, true) {
@@ -982,13 +984,13 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		case prevSecretEmpty && !newSecretEmpty:
 			s.registerManagementRoutes()
 			if s.managementRoutesEnabled.CompareAndSwap(false, true) {
-				log.Info("management routes enabled after secret key update")
+				log.Info("management routes enabled after remote management key update")
 			} else {
 				s.managementRoutesEnabled.Store(true)
 			}
 		case !prevSecretEmpty && newSecretEmpty:
 			if s.managementRoutesEnabled.CompareAndSwap(true, false) {
-				log.Info("management routes disabled after secret key removal")
+				log.Info("management routes disabled after remote management key removal")
 			} else {
 				s.managementRoutesEnabled.Store(false)
 			}

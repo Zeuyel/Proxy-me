@@ -19,11 +19,15 @@ import { useQuotaLoader } from '@/components/quota/useQuotaLoader';
 import { QuotaProgressBar, type QuotaStatusState } from '@/components/quota/QuotaCard';
 import {
   IconBot,
+  IconChevronDown,
+  IconClipboard,
   IconCode,
   IconDownload,
+  IconFileText,
   IconInfo,
   IconRefreshCw,
   IconTrash2,
+  IconUpload,
   IconX,
 } from '@/components/ui/icons';
 import { useAuthStore, useNotificationStore, useThemeStore } from '@/stores';
@@ -135,6 +139,14 @@ interface PrefixProxyEditorState {
   json: Record<string, unknown> | null;
   prefix: string;
   proxyUrl: string;
+}
+
+interface AuthFileMetadataEditorState {
+  originalName: string;
+  fileName: string;
+  displayName: string;
+  tagsText: string;
+  saving: boolean;
 }
 
 const buildEmptyMappingEntry = (): OAuthModelMappingFormEntry => ({
@@ -331,8 +343,15 @@ export function AuthFilesPage() {
   const [savingMappings, setSavingMappings] = useState(false);
 
   const [prefixProxyEditor, setPrefixProxyEditor] = useState<PrefixProxyEditorState | null>(null);
+  const [metadataEditor, setMetadataEditor] = useState<AuthFileMetadataEditorState | null>(null);
+  const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
+  const [pasteModalOpen, setPasteModalOpen] = useState(false);
+  const [pasteFileName, setPasteFileName] = useState('');
+  const [pasteJsonText, setPasteJsonText] = useState('');
+  const [pasteUploading, setPasteUploading] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadMenuRef = useRef<HTMLDivElement | null>(null);
   const loadingKeyStatsRef = useRef(false);
   const excludedUnsupportedRef = useRef(false);
   const mappingsUnsupportedRef = useRef(false);
@@ -379,6 +398,17 @@ export function AuthFilesPage() {
     if (isGeminiCliFile(item) && !isRuntimeOnlyAuthFile(item)) return true;
     return false;
   }, []);
+
+  useEffect(() => {
+    if (!uploadMenuOpen) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!uploadMenuRef.current) return;
+      if (uploadMenuRef.current.contains(event.target as Node)) return;
+      setUploadMenuOpen(false);
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [uploadMenuOpen]);
 
   const modelSourceFileOptions = useMemo(() => {
     const normalizedProvider = normalizeProviderKey(mappingForm.provider);
@@ -497,6 +527,51 @@ export function AuthFilesPage() {
     const raw = item['modtime'] ?? item.modified;
     const date = parseTimestampValue(raw);
     return date ? date.toLocaleString() : '-';
+  };
+
+  const formatImportedAt = (item: AuthFileItem): string => {
+    const raw = item['imported_at'] ?? item.importedAt ?? item['created_at'];
+    const date = parseTimestampValue(raw);
+    return date ? date.toLocaleString() : '-';
+  };
+
+  const getAuthFileDisplayName = (item: AuthFileItem): string => {
+    return String(item['display_name'] ?? item.displayName ?? '').trim();
+  };
+
+  const getAuthFileTags = (item: AuthFileItem): string[] => {
+    const raw = item.tags;
+    if (!Array.isArray(raw)) return [];
+    const seen = new Set<string>();
+    return raw
+      .map((tag) => String(tag ?? '').trim())
+      .filter((tag) => {
+        if (!tag) return false;
+        const key = tag.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  };
+
+  const normalizeAuthFileNameInput = (value: string): string => {
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+    return trimmed.toLowerCase().endsWith('.json') ? trimmed : `${trimmed}.json`;
+  };
+
+  const splitTagsText = (value: string): string[] => {
+    const seen = new Set<string>();
+    return value
+      .split(/[\n,]+/)
+      .map((tag) => tag.trim())
+      .filter((tag) => {
+        if (!tag) return false;
+        const key = tag.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
   };
 
   const resolveDisabledReason = (item: AuthFileItem): string | null => {
@@ -740,9 +815,13 @@ export function AuthFilesPage() {
     return files.filter((item) => {
       const matchType = filter === 'all' || item.type === filter;
       const term = search.trim().toLowerCase();
+      const displayName = String(item['display_name'] ?? item.displayName ?? '').toLowerCase();
+      const tagText = Array.isArray(item.tags) ? item.tags.join(' ').toLowerCase() : '';
       const matchSearch =
         !term ||
         item.name.toLowerCase().includes(term) ||
+        displayName.includes(term) ||
+        tagText.includes(term) ||
         (item.type || '').toString().toLowerCase().includes(term) ||
         (item.provider || '').toString().toLowerCase().includes(term);
       return matchType && matchSearch;
@@ -908,9 +987,20 @@ export function AuthFilesPage() {
     }
   }, [loadFiles, loadInlineQuotas, supportsInlineQuota]);
 
-  // 点击上传
-  const handleUploadClick = () => {
+  const openUploadPasteModal = () => {
+    setUploadMenuOpen(false);
+    setPasteFileName('');
+    setPasteJsonText('');
+    setPasteModalOpen(true);
+  };
+
+  const openUploadFilePicker = () => {
+    setUploadMenuOpen(false);
     fileInputRef.current?.click();
+  };
+
+  const handleUploadClick = () => {
+    setUploadMenuOpen((prev) => !prev);
   };
 
   // 处理文件上传（支持多选）
@@ -918,6 +1008,7 @@ export function AuthFilesPage() {
     const fileList = event.target.files;
     if (!fileList || fileList.length === 0) return;
 
+    setUploadMenuOpen(false);
     const filesToUpload = Array.from(fileList);
     const validFiles: File[] = [];
     const invalidFiles: string[] = [];
@@ -972,6 +1063,7 @@ export function AuthFilesPage() {
       );
       await loadFiles();
       await loadKeyStats();
+      await loadApiKeyAuthMapping();
     }
 
     if (failed.length > 0) {
@@ -981,6 +1073,95 @@ export function AuthFilesPage() {
 
     setUploading(false);
     event.target.value = '';
+  };
+
+  const handlePasteUpload = async () => {
+    const name = normalizeAuthFileNameInput(pasteFileName);
+    const text = pasteJsonText.trim();
+    if (!name) {
+      showNotification(t('auth_files.upload_paste_name_required'), 'error');
+      return;
+    }
+    if (!text) {
+      showNotification(t('auth_files.upload_paste_body_required'), 'error');
+      return;
+    }
+    if (new Blob([text]).size > MAX_AUTH_FILE_SIZE) {
+      showNotification(
+        t('auth_files.upload_error_size', { maxSize: formatFileSize(MAX_AUTH_FILE_SIZE) }),
+        'error'
+      );
+      return;
+    }
+    try {
+      JSON.parse(text);
+    } catch {
+      showNotification(t('auth_files.upload_paste_invalid_json'), 'error');
+      return;
+    }
+
+    setPasteUploading(true);
+    try {
+      await authFilesApi.uploadText(name, text);
+      showNotification(t('auth_files.upload_success'), 'success');
+      setPasteModalOpen(false);
+      setPasteFileName('');
+      setPasteJsonText('');
+      await loadFiles();
+      await loadKeyStats();
+      await loadApiKeyAuthMapping();
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      showNotification(`${t('notification.upload_failed')}: ${errorMessage}`, 'error');
+    } finally {
+      setPasteUploading(false);
+    }
+  };
+
+  const openMetadataEditor = (item: AuthFileItem) => {
+    const name = String(item.name || '').trim();
+    if (!name) return;
+    setMetadataEditor({
+      originalName: name,
+      fileName: name,
+      displayName: getAuthFileDisplayName(item),
+      tagsText: getAuthFileTags(item).join(', '),
+      saving: false,
+    });
+  };
+
+  const handleMetadataSave = async () => {
+    if (!metadataEditor) return;
+    const originalName = metadataEditor.originalName.trim();
+    const nextName = normalizeAuthFileNameInput(metadataEditor.fileName);
+    const displayName = metadataEditor.displayName.trim();
+    const tags = splitTagsText(metadataEditor.tagsText);
+
+    if (!originalName || !nextName) {
+      showNotification(t('auth_files.metadata_name_required'), 'error');
+      return;
+    }
+
+    setMetadataEditor((prev) => (prev ? { ...prev, saving: true } : prev));
+    try {
+      if (nextName !== originalName) {
+        await authFilesApi.rename(originalName, nextName);
+      }
+      await authFilesApi.updateMetadata(nextName, {
+        display_name: displayName,
+        tags,
+      });
+      showNotification(t('auth_files.metadata_save_success'), 'success');
+      setMetadataEditor(null);
+      await loadFiles();
+      await loadKeyStats();
+      await loadApiKeyAuthMapping();
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+      showNotification(`${t('notification.save_failed')}: ${errorMessage}`, 'error');
+    } finally {
+      setMetadataEditor((prev) => (prev ? { ...prev, saving: false } : prev));
+    }
   };
 
   // 删除单个文件
@@ -1804,9 +1985,9 @@ export function AuthFilesPage() {
   };
 
   // 渲染单个认证文件卡片
-		  const renderFileCard = (item: AuthFileItem) => {
-	    const fileStats = resolveAuthFileStats(item, keyStats);
-	    const isRuntimeOnly = isRuntimeOnlyAuthFile(item);
+  const renderFileCard = (item: AuthFileItem) => {
+    const fileStats = resolveAuthFileStats(item, keyStats);
+    const isRuntimeOnly = isRuntimeOnlyAuthFile(item);
       const effectiveDisabled = isEffectiveDisabled(item);
       const cooldownActive = isCooldownDisabled(item);
       const disabledReason = resolveDisabledReason(item);
@@ -1817,6 +1998,8 @@ export function AuthFilesPage() {
       const showQuotaRefreshButton = supportsInlineQuota(item);
       const refreshingSingleQuota = quotaRefreshingSingle[item.name] === true;
       const assignedApiKeyCount = getAuthFileAssignmentCount(item);
+      const displayName = getAuthFileDisplayName(item);
+      const tags = getAuthFileTags(item);
 
 	    return (
 	      <div
@@ -1836,8 +2019,14 @@ export function AuthFilesPage() {
           </span>
           <span className={styles.fileName}>{item.name}</span>
         </div>
+        {displayName && displayName !== item.name && (
+          <div className={styles.fileDisplayName}>{displayName}</div>
+        )}
 
         <div className={styles.cardMeta}>
+          <span>
+            {t('auth_files.imported_at')}: {formatImportedAt(item)}
+          </span>
           <span>
             {t('auth_files.file_size')}: {item.size ? formatFileSize(item.size) : '-'}
           </span>
@@ -1857,6 +2046,16 @@ export function AuthFilesPage() {
               : t('auth_files.assignment_tag_unassigned')}
           </span>
         </div>
+
+        {tags.length > 0 && (
+          <div className={styles.tagRow}>
+            {tags.map((tag) => (
+              <span key={tag} className={styles.tagPill}>
+                {tag}
+              </span>
+            ))}
+          </div>
+        )}
 
         {disabledReason && (
           <div className={styles.disabledInfoRow}>
@@ -1914,27 +2113,37 @@ export function AuthFilesPage() {
               ) : (
                 <IconX className={styles.actionIcon} size={16} />
               )}
-            </Button>
-          )}
-          {showModelsButton && (
-            <Button
-              variant="secondary"
+              </Button>
+            )}
+            {showModelsButton && (
+              <Button
+                variant="secondary"
               size="sm"
               onClick={() => showModels(item)}
               className={styles.iconButton}
               title={t('auth_files.models_button', { defaultValue: '模型' })}
               disabled={disableControls}
             >
-              <IconBot className={styles.actionIcon} size={16} />
-            </Button>
-          )}
-          {!isRuntimeOnly && (
-            <>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => showDetails(item)}
-                className={styles.iconButton}
+                <IconBot className={styles.actionIcon} size={16} />
+              </Button>
+            )}
+            {!isRuntimeOnly && (
+              <>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => openMetadataEditor(item)}
+                  className={styles.iconButton}
+                  title={t('auth_files.metadata_button')}
+                  disabled={disableControls}
+                >
+                  <IconFileText className={styles.actionIcon} size={16} />
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => showDetails(item)}
+                  className={styles.iconButton}
                 title={t('common.info', { defaultValue: '关于' })}
                 disabled={disableControls}
               >
@@ -2069,14 +2278,32 @@ export function AuthFilesPage() {
             >
               {t('auth_files.reset_all_cooldowns_button')}
             </Button>
-            <Button
-              size="sm"
-              onClick={handleUploadClick}
-              disabled={disableControls || uploading}
-              loading={uploading}
-            >
-              {t('auth_files.upload_button')}
-            </Button>
+            <div className={styles.uploadMenu} ref={uploadMenuRef}>
+              <Button
+                size="sm"
+                onClick={handleUploadClick}
+                disabled={disableControls || uploading}
+                loading={uploading}
+                className={styles.uploadMenuButton}
+                title={t('auth_files.upload_button')}
+              >
+                <IconUpload className={styles.actionIcon} size={16} />
+                <span>{t('auth_files.upload_button')}</span>
+                <IconChevronDown className={styles.uploadMenuChevron} size={14} />
+              </Button>
+              {uploadMenuOpen && (
+                <div className={styles.uploadMenuDropdown}>
+                  <button type="button" className={styles.uploadMenuItem} onClick={openUploadPasteModal}>
+                    <IconClipboard size={16} />
+                    <span>{t('auth_files.upload_paste_menu')}</span>
+                  </button>
+                  <button type="button" className={styles.uploadMenuItem} onClick={openUploadFilePicker}>
+                    <IconFileText size={16} />
+                    <span>{t('auth_files.upload_file_menu')}</span>
+                  </button>
+                </div>
+              )}
+            </div>
             <Button
               variant="danger"
               size="sm"
@@ -2138,6 +2365,116 @@ export function AuthFilesPage() {
           <div className={styles.fileGrid}>{pageItems.map(renderFileCard)}</div>
         )}
       </Card>
+
+      <Modal
+        open={pasteModalOpen}
+        onClose={() => {
+          if (pasteUploading) return;
+          setPasteModalOpen(false);
+        }}
+        closeDisabled={pasteUploading}
+        width={760}
+        title={t('auth_files.upload_paste_title')}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setPasteModalOpen(false)} disabled={pasteUploading}>
+              {t('common.cancel')}
+            </Button>
+            <Button onClick={() => void handlePasteUpload()} loading={pasteUploading} disabled={disableControls}>
+              {t('auth_files.upload_paste_submit')}
+            </Button>
+          </>
+        }
+      >
+        <div className={styles.formGroup}>
+          <label>{t('auth_files.upload_paste_name_label')}</label>
+          <Input
+            value={pasteFileName}
+            onChange={(e) => setPasteFileName(e.target.value)}
+            placeholder={t('auth_files.upload_paste_name_placeholder')}
+            disabled={pasteUploading}
+          />
+        </div>
+        <div className={styles.formGroup}>
+          <label>{t('auth_files.upload_paste_body_label')}</label>
+          <textarea
+            className={styles.textarea}
+            rows={14}
+            value={pasteJsonText}
+            onChange={(e) => setPasteJsonText(e.target.value)}
+            placeholder={t('auth_files.upload_paste_body_placeholder')}
+            disabled={pasteUploading}
+          />
+        </div>
+      </Modal>
+
+      <Modal
+        open={Boolean(metadataEditor)}
+        onClose={() => {
+          if (metadataEditor?.saving) return;
+          setMetadataEditor(null);
+        }}
+        closeDisabled={metadataEditor?.saving === true}
+        width={720}
+        title={t('auth_files.metadata_title')}
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              onClick={() => setMetadataEditor(null)}
+              disabled={metadataEditor?.saving === true}
+            >
+              {t('common.cancel')}
+            </Button>
+            <Button
+              onClick={() => void handleMetadataSave()}
+              loading={metadataEditor?.saving === true}
+              disabled={disableControls || metadataEditor?.saving === true}
+            >
+              {t('common.save')}
+            </Button>
+          </>
+        }
+      >
+        {metadataEditor && (
+          <div className={styles.metadataEditor}>
+            <Input
+              label={t('auth_files.metadata_file_name')}
+              value={metadataEditor.fileName}
+              onChange={(e) =>
+                setMetadataEditor((prev) =>
+                  prev ? { ...prev, fileName: e.target.value } : prev
+                )
+              }
+              disabled={metadataEditor.saving}
+            />
+            <Input
+              label={t('auth_files.metadata_display_name')}
+              value={metadataEditor.displayName}
+              onChange={(e) =>
+                setMetadataEditor((prev) =>
+                  prev ? { ...prev, displayName: e.target.value } : prev
+                )
+              }
+              disabled={metadataEditor.saving}
+            />
+            <div className={styles.formGroup}>
+              <label>{t('auth_files.metadata_tags')}</label>
+              <textarea
+                className={styles.textarea}
+                rows={5}
+                value={metadataEditor.tagsText}
+                onChange={(e) =>
+                  setMetadataEditor((prev) => (prev ? { ...prev, tagsText: e.target.value } : prev))
+                }
+                placeholder={t('auth_files.metadata_tags_placeholder')}
+                disabled={metadataEditor.saving}
+              />
+              <div className={styles.hint}>{t('auth_files.metadata_tags_hint')}</div>
+            </div>
+          </div>
+        )}
+      </Modal>
 
       {/* OAuth 排除列表卡片 */}
       <Card

@@ -57,6 +57,13 @@ const (
 	quotaBackoffMax           = 30 * time.Minute
 )
 
+type authExecutionResult struct {
+	response    cliproxyexecutor.Response
+	stream      <-chan cliproxyexecutor.StreamChunk
+	err         error
+	attemptAuth *Auth
+}
+
 var quotaCooldownDisabled atomic.Bool
 
 // SetQuotaCooldownDisabled toggles quota cooldown scheduling globally.
@@ -621,19 +628,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 
 		tried[auth.ID] = struct{}{}
-		execCtx := ctx
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
-		execReq := req
-		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
-		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
-		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+		resultExec := m.executeWithProxyFallback(ctx, auth, routeModel, req, func(execCtx context.Context, execAuth *Auth, execReq cliproxyexecutor.Request) (cliproxyexecutor.Response, error) {
+			return executor.Execute(execCtx, execAuth, execReq, opts)
+		})
+		resp, errExec := resultExec.response, resultExec.err
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
-			if errCtx := execCtx.Err(); errCtx != nil {
+			if errCtx := ctx.Err(); errCtx != nil {
 				return cliproxyexecutor.Response{}, errCtx
 			}
 			result.Error = &Error{Message: errExec.Error()}
@@ -645,14 +646,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				result.RetryAfter = ra
 			}
 			result.QuotaReason = quotaReasonFromError(errExec)
-			m.MarkResult(execCtx, result)
+			m.MarkResult(ctx, result)
 			lastErr = errExec
 			if !shouldRotateAuthOnError(errExec) {
 				return cliproxyexecutor.Response{}, errExec
 			}
 			continue
 		}
-		m.MarkResult(execCtx, result)
+		m.MarkResult(ctx, result)
 		return resp, nil
 	}
 }
@@ -678,19 +679,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 
 		tried[auth.ID] = struct{}{}
-		execCtx := ctx
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
-		execReq := req
-		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
-		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
-		resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+		resultExec := m.executeWithProxyFallback(ctx, auth, routeModel, req, func(execCtx context.Context, execAuth *Auth, execReq cliproxyexecutor.Request) (cliproxyexecutor.Response, error) {
+			return executor.CountTokens(execCtx, execAuth, execReq, opts)
+		})
+		resp, errExec := resultExec.response, resultExec.err
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
-			if errCtx := execCtx.Err(); errCtx != nil {
+			if errCtx := ctx.Err(); errCtx != nil {
 				return cliproxyexecutor.Response{}, errCtx
 			}
 			result.Error = &Error{Message: errExec.Error()}
@@ -702,14 +697,14 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				result.RetryAfter = ra
 			}
 			result.QuotaReason = quotaReasonFromError(errExec)
-			m.MarkResult(execCtx, result)
+			m.MarkResult(ctx, result)
 			lastErr = errExec
 			if !shouldRotateAuthOnError(errExec) {
 				return cliproxyexecutor.Response{}, errExec
 			}
 			continue
 		}
-		m.MarkResult(execCtx, result)
+		m.MarkResult(ctx, result)
 		return resp, nil
 	}
 }
@@ -735,18 +730,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		debugLogAuthSelection(entry, auth, provider, req.Model)
 
 		tried[auth.ID] = struct{}{}
-		execCtx := ctx
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
-		execReq := req
-		execReq.Model = rewriteModelForAuth(routeModel, auth)
-		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
-		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
-		chunks, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
+		resultExec := m.executeStreamWithProxyFallback(ctx, auth, routeModel, req, func(execCtx context.Context, execAuth *Auth, execReq cliproxyexecutor.Request) (<-chan cliproxyexecutor.StreamChunk, error) {
+			return executor.ExecuteStream(execCtx, execAuth, execReq, opts)
+		})
+		chunks, errStream := resultExec.stream, resultExec.err
 		if errStream != nil {
-			if errCtx := execCtx.Err(); errCtx != nil {
+			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
 			rerr := &Error{Message: errStream.Error()}
@@ -757,7 +746,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			result.QuotaReason = quotaReasonFromError(errStream)
-			m.MarkResult(execCtx, result)
+			m.MarkResult(ctx, result)
 			lastErr = errStream
 			if !shouldRotateAuthOnError(errStream) {
 				return nil, errStream
@@ -765,6 +754,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		out := make(chan cliproxyexecutor.StreamChunk)
+		streamAuth := auth.Clone()
+		if resultExec.attemptAuth != nil {
+			streamAuth = resultExec.attemptAuth.Clone()
+		}
 		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk) {
 			defer close(out)
 			var failed bool
@@ -798,9 +791,146 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if !failed {
 				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
 			}
-		}(execCtx, auth.Clone(), provider, chunks)
+		}(ctx, streamAuth, provider, chunks)
 		return out, nil
 	}
+}
+
+func (m *Manager) buildExecContext(ctx context.Context, auth *Auth) context.Context {
+	execCtx := ctx
+	if rt := m.roundTripperFor(auth); rt != nil {
+		execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
+		execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+	}
+	return execCtx
+}
+
+func (m *Manager) buildExecRequest(auth *Auth, routeModel string, req cliproxyexecutor.Request) cliproxyexecutor.Request {
+	execReq := req
+	execReq.Model = rewriteModelForAuth(routeModel, auth)
+	execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
+	execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+	return execReq
+}
+
+func (m *Manager) executeWithProxyFallback(
+	ctx context.Context,
+	auth *Auth,
+	routeModel string,
+	req cliproxyexecutor.Request,
+	run func(context.Context, *Auth, cliproxyexecutor.Request) (cliproxyexecutor.Response, error),
+) authExecutionResult {
+	if auth == nil {
+		return authExecutionResult{err: &Error{Code: "auth_not_found", Message: "auth not found"}}
+	}
+	proxies := SplitProxyPool(auth.ProxyURL)
+	if len(proxies) == 0 {
+		execCtx := m.buildExecContext(ctx, auth)
+		execReq := m.buildExecRequest(auth, routeModel, req)
+		resp, err := run(execCtx, auth, execReq)
+		return authExecutionResult{response: resp, err: err, attemptAuth: auth}
+	}
+
+	now := time.Now()
+	var lastErr error
+	for _, proxyURL := range proxies {
+		if IsProxyURLCooling(proxyURL, now) {
+			continue
+		}
+		attemptAuth := auth.Clone()
+		attemptAuth.ProxyURL = proxyURL
+		execCtx := m.buildExecContext(ctx, attemptAuth)
+		execReq := m.buildExecRequest(attemptAuth, routeModel, req)
+		resp, err := run(execCtx, attemptAuth, execReq)
+		if err == nil {
+			return authExecutionResult{response: resp, attemptAuth: attemptAuth}
+		}
+		if errCtx := execCtx.Err(); errCtx != nil {
+			return authExecutionResult{err: errCtx, attemptAuth: attemptAuth}
+		}
+		lastErr = err
+		if statusCodeFromError(err) == http.StatusForbidden {
+			BanProxyURL(proxyURL, now)
+			continue
+		}
+		return authExecutionResult{response: resp, err: err, attemptAuth: attemptAuth}
+	}
+
+	attemptAuth := auth.Clone()
+	attemptAuth.ProxyURL = ""
+	execCtx := m.buildExecContext(ctx, attemptAuth)
+	execReq := m.buildExecRequest(attemptAuth, routeModel, req)
+	resp, err := run(execCtx, attemptAuth, execReq)
+	if err == nil {
+		return authExecutionResult{response: resp, attemptAuth: attemptAuth}
+	}
+	if errCtx := execCtx.Err(); errCtx != nil {
+		return authExecutionResult{err: errCtx, attemptAuth: attemptAuth}
+	}
+	if err != nil {
+		lastErr = err
+	}
+	return authExecutionResult{response: resp, err: lastErr, attemptAuth: attemptAuth}
+}
+
+func (m *Manager) executeStreamWithProxyFallback(
+	ctx context.Context,
+	auth *Auth,
+	routeModel string,
+	req cliproxyexecutor.Request,
+	run func(context.Context, *Auth, cliproxyexecutor.Request) (<-chan cliproxyexecutor.StreamChunk, error),
+) authExecutionResult {
+	if auth == nil {
+		return authExecutionResult{err: &Error{Code: "auth_not_found", Message: "auth not found"}}
+	}
+	proxies := SplitProxyPool(auth.ProxyURL)
+	if len(proxies) == 0 {
+		execCtx := m.buildExecContext(ctx, auth)
+		execReq := m.buildExecRequest(auth, routeModel, req)
+		stream, err := run(execCtx, auth, execReq)
+		return authExecutionResult{stream: stream, err: err, attemptAuth: auth}
+	}
+
+	now := time.Now()
+	var lastErr error
+	for _, proxyURL := range proxies {
+		if IsProxyURLCooling(proxyURL, now) {
+			continue
+		}
+		attemptAuth := auth.Clone()
+		attemptAuth.ProxyURL = proxyURL
+		execCtx := m.buildExecContext(ctx, attemptAuth)
+		execReq := m.buildExecRequest(attemptAuth, routeModel, req)
+		stream, err := run(execCtx, attemptAuth, execReq)
+		if err == nil {
+			return authExecutionResult{stream: stream, attemptAuth: attemptAuth}
+		}
+		if errCtx := execCtx.Err(); errCtx != nil {
+			return authExecutionResult{err: errCtx, attemptAuth: attemptAuth}
+		}
+		lastErr = err
+		if statusCodeFromError(err) == http.StatusForbidden {
+			BanProxyURL(proxyURL, now)
+			continue
+		}
+		return authExecutionResult{stream: stream, err: err, attemptAuth: attemptAuth}
+	}
+
+	attemptAuth := auth.Clone()
+	attemptAuth.ProxyURL = ""
+	execCtx := m.buildExecContext(ctx, attemptAuth)
+	execReq := m.buildExecRequest(attemptAuth, routeModel, req)
+	stream, err := run(execCtx, attemptAuth, execReq)
+	if err == nil {
+		return authExecutionResult{stream: stream, attemptAuth: attemptAuth}
+	}
+	if errCtx := execCtx.Err(); errCtx != nil {
+		return authExecutionResult{err: errCtx, attemptAuth: attemptAuth}
+	}
+	if err != nil {
+		lastErr = err
+	}
+	return authExecutionResult{stream: stream, err: lastErr, attemptAuth: attemptAuth}
 }
 
 func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel string) cliproxyexecutor.Options {

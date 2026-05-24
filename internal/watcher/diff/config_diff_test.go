@@ -194,6 +194,7 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 		},
 		RemoteManagement: config.RemoteManagement{
 			SecretKey: "",
+			UploadKey: "",
 		},
 	}
 	newCfg := &config.Config{
@@ -205,6 +206,7 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 		},
 		RemoteManagement: config.RemoteManagement{
 			SecretKey: "new-secret",
+			UploadKey: "new-upload-secret",
 		},
 	}
 
@@ -212,6 +214,7 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 	expectContains(t, details, "api-keys count: 1 -> 3")
 	expectContains(t, details, "ampcode.upstream-api-key: added")
 	expectContains(t, details, "remote-management.secret-key: created")
+	expectContains(t, details, "remote-management.upload-key: created")
 }
 
 func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {

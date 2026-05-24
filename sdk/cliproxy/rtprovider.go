@@ -5,8 +5,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
+	"time"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -29,7 +29,7 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 	if auth == nil {
 		return nil
 	}
-	proxyStr := strings.TrimSpace(auth.ProxyURL)
+	proxyStr := coreauth.FirstUsableProxyURL(auth.ProxyURL, time.Now())
 	if proxyStr == "" {
 		return nil
 	}

@@ -117,6 +117,10 @@ type Config struct {
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
+	// AuthFileMetadata stores management-only labels for file-backed credentials.
+	// It intentionally lives in config instead of credential JSON to avoid changing provider auth payloads.
+	AuthFileMetadata map[string]AuthFileMetadata `yaml:"auth-file-metadata,omitempty" json:"auth-file-metadata,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
@@ -173,6 +177,8 @@ type RemoteManagement struct {
 	AllowRemote bool `yaml:"allow-remote"`
 	// SecretKey is the management key (plaintext or bcrypt hashed). YAML key intentionally 'secret-key'.
 	SecretKey string `yaml:"secret-key"`
+	// UploadKey is an auth-file upload-only key (plaintext or bcrypt hashed).
+	UploadKey string `yaml:"upload-key"`
 	// DisableControlPanel skips serving and syncing the bundled management UI when true.
 	DisableControlPanel bool `yaml:"disable-control-panel"`
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
@@ -249,6 +255,13 @@ type OAuthModelAlias struct {
 	Name  string `yaml:"name" json:"name"`
 	Alias string `yaml:"alias" json:"alias"`
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
+}
+
+// AuthFileMetadata stores operator-facing metadata for an auth file.
+type AuthFileMetadata struct {
+	ImportedAt  string   `yaml:"imported-at,omitempty" json:"imported_at,omitempty"`
+	DisplayName string   `yaml:"display-name,omitempty" json:"display_name,omitempty"`
+	Tags        []string `yaml:"tags,omitempty" json:"tags,omitempty"`
 }
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
@@ -641,6 +654,17 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
 		// Preserve YAML comments and ordering; update only the nested key.
 		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, []string{"remote-management", "secret-key"}, hashed)
+	}
+	if cfg.RemoteManagement.UploadKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.UploadKey) {
+		hashed, errHash := hashSecret(cfg.RemoteManagement.UploadKey)
+		if errHash != nil {
+			return nil, fmt.Errorf("failed to hash remote management upload key: %w", errHash)
+		}
+		cfg.RemoteManagement.UploadKey = hashed
+
+		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
+		// Preserve YAML comments and ordering; update only the nested key.
+		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, []string{"remote-management", "upload-key"}, hashed)
 	}
 
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)

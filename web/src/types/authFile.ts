@@ -30,6 +30,12 @@ export interface AuthFileItem {
   cooldownReason?: string;
   cooldownUntil?: string | number | Date;
   modified?: number;
+  imported_at?: string | number | Date;
+  importedAt?: string | number | Date;
+  imported_at_source?: string;
+  display_name?: string;
+  displayName?: string;
+  tags?: string[];
   [key: string]: any;
 }
 

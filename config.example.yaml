@@ -22,6 +22,10 @@ remote-management:
   # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
   secret-key: ""
 
+  # Upload-only key for POST /v0/management/auth-files.
+  # When set, this key can upload auth files but cannot access other management routes.
+  upload-key: ""
+
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
 

@@ -60,6 +60,11 @@ type imageCollectionResult struct {
 	errMsg  *interfaces.ErrorMessage
 }
 
+type imageStreamDispatch struct {
+	data <-chan []byte
+	errs <-chan *interfaces.ErrorMessage
+}
+
 type imageJSONShellWriter struct {
 	writer  io.Writer
 	flusher http.Flusher
@@ -288,6 +293,53 @@ func multipartFileToDataURL(fileHeader *multipart.FileHeader) (string, error) {
 
 	b64 := base64.StdEncoding.EncodeToString(data)
 	return "data:" + mediaType + ";base64," + b64, nil
+}
+
+func normalizeImageDataURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return raw
+	}
+	if !strings.HasPrefix(strings.ToLower(raw), "data:") {
+		return raw
+	}
+	comma := strings.IndexByte(raw, ',')
+	if comma <= len("data:") {
+		return raw
+	}
+
+	meta := raw[len("data:"):comma]
+	payload := strings.TrimSpace(raw[comma+1:])
+	if payload == "" {
+		return raw
+	}
+
+	semi := strings.IndexByte(meta, ';')
+	mediaType := meta
+	params := ""
+	if semi >= 0 {
+		mediaType = meta[:semi]
+		params = meta[semi:]
+	}
+	if strings.TrimSpace(mediaType) != "" && !strings.EqualFold(strings.TrimSpace(mediaType), "image") {
+		return raw
+	}
+	if !strings.Contains(strings.ToLower(params), ";base64") {
+		return raw
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(payload)
+		if err != nil {
+			return raw
+		}
+	}
+	detected := http.DetectContentType(decoded)
+	if !strings.HasPrefix(strings.ToLower(detected), "image/") {
+		detected = "image/png"
+	}
+	return "data:" + detected + ";base64," + payload
 }
 
 func parseIntField(raw string, fallback int64) int64 {
@@ -534,7 +586,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	}
 
 	if maskDataURL != nil && strings.TrimSpace(*maskDataURL) != "" {
-		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", strings.TrimSpace(*maskDataURL))
+		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", normalizeImageDataURL(strings.TrimSpace(*maskDataURL)))
 	}
 
 	responsesReq := buildImagesResponsesRequest(prompt, images, tool)
@@ -651,7 +703,7 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 	}
 
 	if maskDataURL != nil && strings.TrimSpace(*maskDataURL) != "" {
-		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", strings.TrimSpace(*maskDataURL))
+		tool, _ = sjson.SetBytes(tool, "input_image_mask.image_url", normalizeImageDataURL(strings.TrimSpace(*maskDataURL)))
 	}
 
 	responsesReq := buildImagesResponsesRequest(prompt, images, tool)
@@ -664,12 +716,23 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 
 func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte) []byte {
 	req := []byte(`{"instructions":"","stream":true,"reasoning":{"effort":"medium","summary":"auto"},"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"model":"","store":false,"tool_choice":{"type":"image_generation"}}`)
-	req, _ = sjson.SetBytes(req, "model", defaultImagesMainModel)
+	mainModel := defaultImagesMainModel
+	if len(toolJSON) > 0 && json.Valid(toolJSON) {
+		toolModel := strings.TrimSpace(gjson.GetBytes(toolJSON, "model").String())
+		if idx := strings.LastIndex(toolModel, "/"); idx > 0 && idx < len(toolModel)-1 {
+			prefix := strings.TrimSpace(toolModel[:idx])
+			if prefix != "" {
+				mainModel = prefix + "/" + defaultImagesMainModel
+			}
+		}
+	}
+	req, _ = sjson.SetBytes(req, "model", mainModel)
 
 	input := []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`)
 	input, _ = sjson.SetBytes(input, "0.content.0.text", prompt)
 	contentIndex := 1
 	for _, img := range images {
+		img = normalizeImageDataURL(img)
 		if strings.TrimSpace(img) == "" {
 			continue
 		}
@@ -699,12 +762,10 @@ func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesR
 	logger.Info("image upstream collection started")
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", defaultImagesMainModel, responsesReq, "")
-
-	resultCh := make(chan imageCollectionResult, 1)
+	dispatchCh := make(chan imageStreamDispatch, 1)
 	go func() {
-		out, summary, errMsg := collectImagesFromResponsesStream(cliCtx, dataChan, errChan, responseFormat)
-		resultCh <- imageCollectionResult{out: out, summary: summary, errMsg: errMsg}
+		dataChan, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", defaultImagesMainModel, responsesReq, "")
+		dispatchCh <- imageStreamDispatch{data: dataChan, errs: errChan}
 	}()
 
 	shellDelay := 2 * time.Second
@@ -718,6 +779,16 @@ func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesR
 		shellInterval = 5 * time.Second
 	}
 
+	var resultCh <-chan imageCollectionResult
+	startCollector := func(dispatch imageStreamDispatch) {
+		ch := make(chan imageCollectionResult, 1)
+		go func() {
+			out, summary, errMsg := collectImagesFromResponsesStream(cliCtx, dispatch.data, dispatch.errs, responseFormat)
+			ch <- imageCollectionResult{out: out, summary: summary, errMsg: errMsg}
+		}()
+		resultCh = ch
+	}
+
 	for {
 		select {
 		case <-cliCtx.Done():
@@ -726,6 +797,9 @@ func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesR
 				"error":       cliCtx.Err(),
 			}).Warn("image upstream collection cancelled")
 			return
+		case dispatch := <-dispatchCh:
+			startCollector(dispatch)
+			dispatchCh = nil
 		case <-delayTimer.C:
 			shellWriter = startImageJSONShell(c, shellInterval)
 			shellStarted = shellWriter != nil
@@ -1072,7 +1146,12 @@ func buildImageShellErrorObject(errMsg *interfaces.ErrorMessage) ([]byte, error)
 	if !json.Valid(body) {
 		return nil, fmt.Errorf("invalid error response body")
 	}
-	return body, nil
+	out := []byte(`{"created":0,"data":[]}`)
+	out, _ = sjson.SetBytes(out, "created", time.Now().Unix())
+	if errorObj := gjson.GetBytes(body, "error"); errorObj.Exists() && errorObj.IsObject() {
+		out, _ = sjson.SetRawBytes(out, "error", []byte(errorObj.Raw))
+	}
+	return out, nil
 }
 
 func buildImagesAPIResponse(results []imageCallResult, createdAt int64, usageRaw []byte, firstMeta imageCallResult, responseFormat string) ([]byte, error) {

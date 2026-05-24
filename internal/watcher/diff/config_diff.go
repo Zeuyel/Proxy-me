@@ -268,6 +268,16 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			changes = append(changes, "remote-management.secret-key: updated")
 		}
 	}
+	if oldCfg.RemoteManagement.UploadKey != newCfg.RemoteManagement.UploadKey {
+		switch {
+		case oldCfg.RemoteManagement.UploadKey == "" && newCfg.RemoteManagement.UploadKey != "":
+			changes = append(changes, "remote-management.upload-key: created")
+		case oldCfg.RemoteManagement.UploadKey != "" && newCfg.RemoteManagement.UploadKey == "":
+			changes = append(changes, "remote-management.upload-key: deleted")
+		default:
+			changes = append(changes, "remote-management.upload-key: updated")
+		}
+	}
 
 	// OpenAI compatibility providers (summarized)
 	if compat := DiffOpenAICompatibility(oldCfg.OpenAICompatibility, newCfg.OpenAICompatibility); len(compat) > 0 {

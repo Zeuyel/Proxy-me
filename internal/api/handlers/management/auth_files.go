@@ -179,6 +179,152 @@ func isWebUIRequest(c *gin.Context) bool {
 	}
 }
 
+func normalizeAuthFileName(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "", fmt.Errorf("name is required")
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return "", fmt.Errorf("invalid name")
+	}
+	name = filepath.Base(name)
+	if name == "." || name == string(os.PathSeparator) {
+		return "", fmt.Errorf("invalid name")
+	}
+	if !strings.HasSuffix(strings.ToLower(name), ".json") {
+		return "", fmt.Errorf("name must end with .json")
+	}
+	return name, nil
+}
+
+func normalizeAuthFileTags(raw []string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	tags := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, item := range raw {
+		tag := strings.TrimSpace(item)
+		if tag == "" {
+			continue
+		}
+		if len(tag) > 64 {
+			tag = tag[:64]
+		}
+		key := strings.ToLower(tag)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		tags = append(tags, tag)
+	}
+	return tags
+}
+
+func (h *Handler) saveConfigNoResponseLocked() error {
+	if h == nil || h.cfg == nil || strings.TrimSpace(h.configFilePath) == "" {
+		return nil
+	}
+	return config.SaveConfigPreserveComments(h.configFilePath, h.cfg)
+}
+
+func (h *Handler) recordAuthFileImportTime(name string, importedAt time.Time) error {
+	name, err := normalizeAuthFileName(name)
+	if err != nil {
+		return err
+	}
+	if importedAt.IsZero() {
+		importedAt = time.Now()
+	}
+	if h == nil || h.cfg == nil {
+		return nil
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg.AuthFileMetadata == nil {
+		h.cfg.AuthFileMetadata = make(map[string]config.AuthFileMetadata)
+	}
+	meta := h.cfg.AuthFileMetadata[name]
+	meta.ImportedAt = importedAt.UTC().Format(time.RFC3339)
+	h.cfg.AuthFileMetadata[name] = meta
+	return h.saveConfigNoResponseLocked()
+}
+
+func (h *Handler) authFileMetadata(name string) (config.AuthFileMetadata, bool) {
+	if h == nil || h.cfg == nil || len(h.cfg.AuthFileMetadata) == 0 {
+		return config.AuthFileMetadata{}, false
+	}
+	candidates := []string{strings.TrimSpace(name), filepath.Base(strings.TrimSpace(name))}
+	for _, candidate := range candidates {
+		if candidate == "" || candidate == "." {
+			continue
+		}
+		if meta, ok := h.cfg.AuthFileMetadata[candidate]; ok {
+			return meta, true
+		}
+	}
+	return config.AuthFileMetadata{}, false
+}
+
+func (h *Handler) applyAuthFileMetadata(entry gin.H, name string, fallbackImportedAt time.Time) {
+	if entry == nil {
+		return
+	}
+	meta, ok := h.authFileMetadata(name)
+	if ok {
+		if importedAt := strings.TrimSpace(meta.ImportedAt); importedAt != "" {
+			entry["imported_at"] = importedAt
+		}
+		if displayName := strings.TrimSpace(meta.DisplayName); displayName != "" {
+			entry["display_name"] = displayName
+		}
+		if tags := normalizeAuthFileTags(meta.Tags); len(tags) > 0 {
+			entry["tags"] = tags
+		} else {
+			entry["tags"] = []string{}
+		}
+	}
+	if _, exists := entry["imported_at"]; !exists && !fallbackImportedAt.IsZero() {
+		entry["imported_at"] = fallbackImportedAt.UTC()
+		entry["imported_at_source"] = "fallback"
+	}
+}
+
+func (h *Handler) removeAuthFileMetadata(names ...string) error {
+	if h == nil || h.cfg == nil || len(names) == 0 {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.cfg.AuthFileMetadata) == 0 {
+		return nil
+	}
+	changed := false
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		for _, candidate := range []string{name, filepath.Base(name)} {
+			if candidate == "" || candidate == "." {
+				continue
+			}
+			if _, ok := h.cfg.AuthFileMetadata[candidate]; ok {
+				delete(h.cfg.AuthFileMetadata, candidate)
+				changed = true
+			}
+		}
+	}
+	if len(h.cfg.AuthFileMetadata) == 0 {
+		h.cfg.AuthFileMetadata = nil
+	}
+	if !changed {
+		return nil
+	}
+	return h.saveConfigNoResponseLocked()
+}
+
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
 	callbackForwardersMu.Lock()
 	prev := callbackForwarders[port]
@@ -510,6 +656,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 				fileData["email"] = emailValue
 			}
 
+			h.applyAuthFileMetadata(fileData, name, info.ModTime())
 			files = append(files, fileData)
 		}
 	}
@@ -601,6 +748,11 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			log.WithError(err).Warnf("failed to stat auth file %s", path)
 		}
 	}
+	importedFallback := auth.CreatedAt
+	if importedFallback.IsZero() {
+		importedFallback = auth.UpdatedAt
+	}
+	h.applyAuthFileMetadata(entry, name, importedFallback)
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
 	}
@@ -752,9 +904,9 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	if file, err := c.FormFile("file"); err == nil && file != nil {
-		name := filepath.Base(file.Filename)
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
-			c.JSON(400, gin.H{"error": "file must be .json"})
+		name, errName := normalizeAuthFileName(file.Filename)
+		if errName != nil {
+			c.JSON(400, gin.H{"error": errName.Error()})
 			return
 		}
 		dst := filepath.Join(h.cfg.AuthDir, name)
@@ -776,16 +928,16 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 			c.JSON(500, gin.H{"error": errReg.Error()})
 			return
 		}
+		if errMeta := h.recordAuthFileImportTime(name, time.Now()); errMeta != nil {
+			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to record import metadata: %v", errMeta)})
+			return
+		}
 		c.JSON(200, gin.H{"status": "ok"})
 		return
 	}
-	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
-		c.JSON(400, gin.H{"error": "invalid name"})
-		return
-	}
-	if !strings.HasSuffix(strings.ToLower(name), ".json") {
-		c.JSON(400, gin.H{"error": "name must end with .json"})
+	name, errName := normalizeAuthFileName(c.Query("name"))
+	if errName != nil {
+		c.JSON(400, gin.H{"error": errName.Error()})
 		return
 	}
 	data, err := io.ReadAll(c.Request.Body)
@@ -807,6 +959,10 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
+	if errMeta := h.recordAuthFileImportTime(name, time.Now()); errMeta != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to record import metadata: %v", errMeta)})
+		return
+	}
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
@@ -824,6 +980,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			return
 		}
 		deleted := 0
+		deletedNames := make([]string, 0)
 		for _, e := range entries {
 			if e.IsDir() {
 				continue
@@ -844,16 +1001,21 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 					return
 				}
 				deleted++
+				deletedNames = append(deletedNames, filepath.Base(full))
 				h.disableAuth(ctx, full)
 				h.cleanupAuthMappings("", "", filepath.Base(full), full)
 			}
 		}
+		if errMeta := h.removeAuthFileMetadata(deletedNames...); errMeta != nil {
+			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to remove auth metadata: %v", errMeta)})
+			return
+		}
 		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
 		return
 	}
-	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
-		c.JSON(400, gin.H{"error": "invalid name"})
+	name, errName := normalizeAuthFileName(c.Query("name"))
+	if errName != nil {
+		c.JSON(400, gin.H{"error": errName.Error()})
 		return
 	}
 	full := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
@@ -876,6 +1038,10 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 	}
 	h.disableAuth(ctx, full)
 	h.cleanupAuthMappings("", "", filepath.Base(full), full)
+	if errMeta := h.removeAuthFileMetadata(filepath.Base(full)); errMeta != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to remove auth metadata: %v", errMeta)})
+		return
+	}
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
@@ -976,6 +1142,288 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 	}
 	_, err := h.authManager.Register(ctx, auth)
 	return err
+}
+
+// PatchAuthFileMetadata updates management-only metadata for an auth file.
+func (h *Handler) PatchAuthFileMetadata(c *gin.Context) {
+	if h == nil || h.cfg == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
+		return
+	}
+	var req struct {
+		Name        string    `json:"name"`
+		DisplayName *string   `json:"display_name"`
+		Tags        *[]string `json:"tags"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	if req.DisplayName == nil && req.Tags == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "display_name or tags is required"})
+		return
+	}
+	name, errName := normalizeAuthFileName(req.Name)
+	if errName != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errName.Error()})
+		return
+	}
+
+	full := filepath.Join(h.cfg.AuthDir, name)
+	if _, err := os.Stat(full); err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to stat auth file: %v", err)})
+		}
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg.AuthFileMetadata == nil {
+		h.cfg.AuthFileMetadata = make(map[string]config.AuthFileMetadata)
+	}
+	meta := h.cfg.AuthFileMetadata[name]
+	if strings.TrimSpace(meta.ImportedAt) == "" {
+		meta.ImportedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	if req.DisplayName != nil {
+		meta.DisplayName = strings.TrimSpace(*req.DisplayName)
+		if len(meta.DisplayName) > 120 {
+			meta.DisplayName = meta.DisplayName[:120]
+		}
+	}
+	if req.Tags != nil {
+		meta.Tags = normalizeAuthFileTags(*req.Tags)
+	}
+	if strings.TrimSpace(meta.ImportedAt) == "" && strings.TrimSpace(meta.DisplayName) == "" && len(meta.Tags) == 0 {
+		delete(h.cfg.AuthFileMetadata, name)
+	} else {
+		h.cfg.AuthFileMetadata[name] = meta
+	}
+	if len(h.cfg.AuthFileMetadata) == 0 {
+		h.cfg.AuthFileMetadata = nil
+	}
+	if err := h.saveConfigNoResponseLocked(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "name": name, "metadata": meta})
+}
+
+// RenameAuthFile renames an auth JSON file and moves management references to the new file name.
+func (h *Handler) RenameAuthFile(c *gin.Context) {
+	if h == nil || h.cfg == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
+		return
+	}
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+	var req struct {
+		Name    string `json:"name"`
+		NewName string `json:"new_name"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	oldName, errOld := normalizeAuthFileName(req.Name)
+	if errOld != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errOld.Error()})
+		return
+	}
+	newName, errNew := normalizeAuthFileName(req.NewName)
+	if errNew != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errNew.Error()})
+		return
+	}
+	if strings.EqualFold(oldName, newName) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "name": oldName})
+		return
+	}
+
+	oldFull := filepath.Join(h.cfg.AuthDir, oldName)
+	newFull := filepath.Join(h.cfg.AuthDir, newName)
+	if !filepath.IsAbs(oldFull) {
+		if abs, errAbs := filepath.Abs(oldFull); errAbs == nil {
+			oldFull = abs
+		}
+	}
+	if !filepath.IsAbs(newFull) {
+		if abs, errAbs := filepath.Abs(newFull); errAbs == nil {
+			newFull = abs
+		}
+	}
+	if _, err := os.Stat(oldFull); err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to stat auth file: %v", err)})
+		}
+		return
+	}
+	if _, err := os.Stat(newFull); err == nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "target auth file already exists"})
+		return
+	} else if !os.IsNotExist(err) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to stat target file: %v", err)})
+		return
+	}
+
+	data, errRead := os.ReadFile(oldFull)
+	if errRead != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read auth file: %v", errRead)})
+		return
+	}
+	oldAuthID := h.authIDForPath(oldFull)
+	newAuthID := h.authIDForPath(newFull)
+	var oldAuth *coreauth.Auth
+	if auth, ok := h.authManager.GetByID(oldAuthID); ok {
+		oldAuth = auth
+	} else {
+		for _, auth := range h.authManager.List() {
+			if auth != nil && auth.FileName == oldName {
+				oldAuth = auth
+				break
+			}
+		}
+	}
+	oldIndex := ""
+	if oldAuth != nil {
+		oldIndex = oldAuth.EnsureIndex()
+	}
+	var oldAuthSnapshot *coreauth.Auth
+	if oldAuth != nil {
+		oldAuthSnapshot = oldAuth.Clone()
+	}
+
+	if errRename := os.Rename(oldFull, newFull); errRename != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to rename auth file: %v", errRename)})
+		return
+	}
+
+	ctx := c.Request.Context()
+	if oldAuth != nil {
+		oldAuth.Disabled = true
+		oldAuth.Status = coreauth.StatusDisabled
+		oldAuth.StatusMessage = "renamed via management API"
+		oldAuth.UpdatedAt = time.Now()
+		_, _ = h.authManager.Update(ctx, oldAuth)
+	}
+	if errReg := h.registerAuthFromFile(ctx, newFull, data); errReg != nil {
+		_ = os.Rename(newFull, oldFull)
+		if oldAuthSnapshot != nil {
+			_, _ = h.authManager.Update(ctx, oldAuthSnapshot)
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errReg.Error()})
+		return
+	}
+	if errCfg := h.moveAuthFileConfigReferences(oldName, newName, oldAuthID, oldIndex, oldFull, newAuthID); errCfg != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth references: %v", errCfg)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "name": newName, "old_name": oldName})
+}
+
+func (h *Handler) moveAuthFileConfigReferences(oldName, newName, oldAuthID, oldIndex, oldPath, newAuthID string) error {
+	if h == nil || h.cfg == nil {
+		return nil
+	}
+	candidates := buildRemovedAuthKeyCandidates(oldAuthID, oldIndex, oldName, oldPath, h.cfg.AuthDir)
+	if len(candidates) == 0 {
+		candidates = []string{oldName}
+	}
+	matchesOld := func(value string) bool {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return false
+		}
+		for _, candidate := range candidates {
+			if strings.EqualFold(value, candidate) {
+				return true
+			}
+		}
+		return false
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	changed := false
+
+	if h.cfg.AuthFileMetadata != nil {
+		var (
+			meta config.AuthFileMetadata
+			ok   bool
+		)
+		for _, candidate := range []string{oldName, filepath.Base(oldName), oldAuthID} {
+			if candidate == "" || candidate == "." {
+				continue
+			}
+			if value, exists := h.cfg.AuthFileMetadata[candidate]; exists {
+				meta = value
+				delete(h.cfg.AuthFileMetadata, candidate)
+				ok = true
+				changed = true
+			}
+		}
+		if ok {
+			if strings.TrimSpace(meta.ImportedAt) == "" {
+				meta.ImportedAt = time.Now().UTC().Format(time.RFC3339)
+			}
+			h.cfg.AuthFileMetadata[newName] = meta
+		}
+		if len(h.cfg.AuthFileMetadata) == 0 {
+			h.cfg.AuthFileMetadata = nil
+		}
+	}
+
+	if len(h.cfg.ProxyRoutingAuth) > 0 {
+		next := make(map[string]string, len(h.cfg.ProxyRoutingAuth))
+		for key, proxyID := range h.cfg.ProxyRoutingAuth {
+			nextKey := key
+			if matchesOld(key) {
+				nextKey = newName
+				changed = true
+			}
+			next[nextKey] = proxyID
+		}
+		h.cfg.ProxyRoutingAuth = next
+	}
+
+	if len(h.cfg.APIKeyAuth) > 0 {
+		for key, refs := range h.cfg.APIKeyAuth {
+			nextRefs := make([]string, 0, len(refs))
+			seen := make(map[string]struct{}, len(refs))
+			for _, ref := range refs {
+				nextRef := strings.TrimSpace(ref)
+				if nextRef == "" {
+					continue
+				}
+				if matchesOld(nextRef) {
+					nextRef = newName
+					changed = true
+				}
+				dedupeKey := strings.ToLower(nextRef)
+				if _, exists := seen[dedupeKey]; exists {
+					changed = true
+					continue
+				}
+				seen[dedupeKey] = struct{}{}
+				nextRefs = append(nextRefs, nextRef)
+			}
+			h.cfg.APIKeyAuth[key] = nextRefs
+		}
+	}
+
+	if !changed {
+		return nil
+	}
+	return h.saveConfigNoResponseLocked()
 }
 
 // PatchAuthFileStatus toggles the disabled state of an auth file
