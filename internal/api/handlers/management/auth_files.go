@@ -803,6 +803,37 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	return result
 }
 
+func hydrateCodexPlanType(metadata map[string]any) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	provider, _ := metadata["type"].(string)
+	if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		return false
+	}
+	if planType, _ := metadata["plan_type"].(string); strings.TrimSpace(planType) != "" {
+		return false
+	}
+	for _, key := range []string{"id_token", "access_token", "token"} {
+		raw, _ := metadata[key].(string)
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		claims, err := codex.ParseJWTToken(raw)
+		if err != nil || claims == nil {
+			continue
+		}
+		planType := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+		if planType == "" {
+			continue
+		}
+		metadata["plan_type"] = planType
+		return true
+	}
+	return false
+}
+
 func resolveCodexAccountID(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
@@ -1097,6 +1128,13 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 	metadata := make(map[string]any)
 	if err := json.Unmarshal(data, &metadata); err != nil {
 		return fmt.Errorf("invalid auth file: %w", err)
+	}
+	if hydrateCodexPlanType(metadata) {
+		if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
+			if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
+				log.WithError(errWrite).Warnf("failed to persist codex plan_type for auth file %s", path)
+			}
+		}
 	}
 	provider, _ := metadata["type"].(string)
 	if provider == "" {

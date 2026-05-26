@@ -160,9 +160,11 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 
 	accountID := ""
 	email := ""
+	planType := ""
 	if claims != nil {
 		accountID = claims.GetAccountID()
 		email = claims.GetUserEmail()
+		planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
 	}
 
 	// Create token data
@@ -172,6 +174,7 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 		RefreshToken: tokenResp.RefreshToken,
 		AccountID:    accountID,
 		Email:        email,
+		PlanType:     planType,
 		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
 	}
 
@@ -244,9 +247,11 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 
 	accountID := ""
 	email := ""
+	planType := ""
 	if claims != nil {
 		accountID = claims.GetAccountID()
 		email = claims.Email
+		planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
 	}
 
 	return &CodexTokenData{
@@ -255,6 +260,7 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 		RefreshToken: tokenResp.RefreshToken,
 		AccountID:    accountID,
 		Email:        email,
+		PlanType:     planType,
 		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
 	}, nil
 }
@@ -269,6 +275,7 @@ func (o *CodexAuth) CreateTokenStorage(bundle *CodexAuthBundle) *CodexTokenStora
 		AccountID:    bundle.TokenData.AccountID,
 		LastRefresh:  bundle.LastRefresh,
 		Email:        bundle.TokenData.Email,
+		PlanType:     bundle.TokenData.PlanType,
 		Expire:       bundle.TokenData.Expire,
 	}
 
@@ -324,5 +331,6 @@ func (o *CodexAuth) UpdateTokenStorage(storage *CodexTokenStorage, tokenData *Co
 	storage.AccountID = tokenData.AccountID
 	storage.LastRefresh = time.Now().Format(time.RFC3339)
 	storage.Email = tokenData.Email
+	storage.PlanType = tokenData.PlanType
 	storage.Expire = tokenData.Expire
 }

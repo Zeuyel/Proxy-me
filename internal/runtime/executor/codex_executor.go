@@ -36,6 +36,10 @@ const (
 	codexResponsesBeta     = "responses_websockets=2026-02-06"
 	codexWebOrigin         = "https://chatgpt.com"
 	codexCodexReferer      = "https://chatgpt.com/codex"
+	// The usage endpoint may report 99.x when the UI already rounds remaining
+	// quota to 0%. Treat that as exhausted so a quota refresh does not clear
+	// cooldown for effectively drained auth files.
+	codexQuotaUsedPercentExhaustedThreshold = 99.5
 )
 
 var dataTag = []byte("data:")
@@ -728,6 +732,66 @@ func DetectCodexQuotaRecoverAt(payload []byte, now time.Time) (time.Time, string
 	return codexQuotaRecoverAt(payload, now)
 }
 
+// DetectCodexQuotaHasAvailableWindow returns true only when a usage payload
+// contains a clear positive quota signal. Unknown payload shapes should not be
+// treated as available because that would incorrectly clear cooldown state.
+func DetectCodexQuotaHasAvailableWindow(payload []byte) bool {
+	root := gjson.ParseBytes(payload)
+	return codexRateLimitHasAvailableWindow(root.Get("rate_limit")) ||
+		codexRateLimitHasAvailableWindow(root.Get("rateLimit")) ||
+		codexRateLimitHasAvailableWindow(root.Get("code_review_rate_limit")) ||
+		codexRateLimitHasAvailableWindow(root.Get("codeReviewRateLimit"))
+}
+
+func codexRateLimitHasAvailableWindow(rateLimit gjson.Result) bool {
+	if !rateLimit.Exists() || rateLimit.Type == gjson.Null {
+		return false
+	}
+	if rateLimit.Get("limit_reached").Bool() || rateLimit.Get("limitReached").Bool() {
+		return false
+	}
+	if allowed := rateLimit.Get("allowed"); allowed.Exists() && !allowed.Bool() {
+		return false
+	}
+	for _, key := range []string{"primary_window", "primaryWindow", "secondary_window", "secondaryWindow"} {
+		window := rateLimit.Get(key)
+		if codexWindowHasAvailableQuota(window) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexWindowHasAvailableQuota(window gjson.Result) bool {
+	if !window.Exists() || window.Type == gjson.Null {
+		return false
+	}
+	if codexWindowLimited(window, false) {
+		return false
+	}
+	for _, key := range []string{"used_percent", "usedPercent"} {
+		if usedPercent, ok := gjsonToFloat(window.Get(key)); ok {
+			return usedPercent < codexQuotaUsedPercentExhaustedThreshold
+		}
+	}
+	for _, key := range []string{"remaining_percent", "remainingPercent"} {
+		if remainingPercent, ok := gjsonToFloat(window.Get(key)); ok {
+			return remainingPercent > 0
+		}
+	}
+	for _, key := range []string{"remaining_fraction", "remainingFraction", "remaining"} {
+		if remainingFraction, ok := gjsonToFloat(window.Get(key)); ok {
+			return remainingFraction > 0
+		}
+	}
+	for _, key := range []string{"remaining_amount", "remainingAmount"} {
+		if remainingAmount, ok := gjsonToFloat(window.Get(key)); ok {
+			return remainingAmount > 0
+		}
+	}
+	return false
+}
+
 func resolveCodexWindowReason(window gjson.Result, reasonPrimary, reasonSecondary string) string {
 	if reasonPrimary == reasonSecondary {
 		return reasonPrimary
@@ -757,14 +821,7 @@ func appendCodexWindowCandidate(candidates *[]struct {
 	if !window.Exists() || window.Type == gjson.Null {
 		return
 	}
-	windowLimited := parentLimited
-	if usedPercent, ok := gjsonToFloat(window.Get("used_percent")); ok && usedPercent >= 100 {
-		windowLimited = true
-	}
-	if usedPercent, ok := gjsonToFloat(window.Get("usedPercent")); ok && usedPercent >= 100 {
-		windowLimited = true
-	}
-	if !windowLimited {
+	if !codexWindowLimited(window, parentLimited) {
 		return
 	}
 	resetAt, ok := codexWindowRecoverAt(window, now)
@@ -778,6 +835,42 @@ func appendCodexWindowCandidate(candidates *[]struct {
 		resetAt: resetAt,
 		reason:  reason,
 	})
+}
+
+func codexWindowLimited(window gjson.Result, parentLimited bool) bool {
+	if !window.Exists() || window.Type == gjson.Null {
+		return false
+	}
+	if parentLimited {
+		return true
+	}
+	if window.Get("limit_reached").Bool() || window.Get("limitReached").Bool() {
+		return true
+	}
+	if allowed := window.Get("allowed"); allowed.Exists() && !allowed.Bool() {
+		return true
+	}
+	for _, key := range []string{"used_percent", "usedPercent"} {
+		if usedPercent, ok := gjsonToFloat(window.Get(key)); ok && usedPercent >= codexQuotaUsedPercentExhaustedThreshold {
+			return true
+		}
+	}
+	for _, key := range []string{"remaining_percent", "remainingPercent"} {
+		if remainingPercent, ok := gjsonToFloat(window.Get(key)); ok && remainingPercent <= 0 {
+			return true
+		}
+	}
+	for _, key := range []string{"remaining_fraction", "remainingFraction", "remaining"} {
+		if remainingFraction, ok := gjsonToFloat(window.Get(key)); ok && remainingFraction <= 0 {
+			return true
+		}
+	}
+	for _, key := range []string{"remaining_amount", "remainingAmount"} {
+		if remainingAmount, ok := gjsonToFloat(window.Get(key)); ok && remainingAmount <= 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func codexWindowRecoverAt(window gjson.Result, now time.Time) (time.Time, bool) {
@@ -979,12 +1072,29 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 		auth.Metadata["account_id"] = td.AccountID
 	}
 	auth.Metadata["email"] = td.Email
+	if planType := strings.TrimSpace(td.PlanType); planType != "" {
+		auth.Metadata["plan_type"] = planType
+	} else if planType := codexPlanTypeFromToken(td.IDToken); planType != "" {
+		auth.Metadata["plan_type"] = planType
+	}
 	// Use unified key in files
 	auth.Metadata["expired"] = td.Expire
 	auth.Metadata["type"] = "codex"
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+func codexPlanTypeFromToken(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	claims, err := codexauth.ParseJWTToken(token)
+	if err != nil || claims == nil {
+		return ""
+	}
+	return strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
 }
 
 func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, rawJSON []byte) (*http.Request, error) {

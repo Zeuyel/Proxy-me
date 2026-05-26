@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -118,6 +119,52 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 	if auths[0].Status != coreauth.StatusActive {
 		t.Errorf("expected status active, got %s", auths[0].Status)
+	}
+}
+
+func TestFileSynthesizer_Synthesize_HydratesCodexPlanType(t *testing.T) {
+	tempDir := t.TempDir()
+
+	authData := map[string]any{
+		"type":     "codex",
+		"email":    "plus@example.com",
+		"id_token": testFileSynthesizerCodexJWT("plus@example.com", "acct", "plus"),
+	}
+	data, _ := json.Marshal(authData)
+	err := os.WriteFile(filepath.Join(tempDir, "codex-auth.json"), data, 0o644)
+	if err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if got, _ := auths[0].Metadata["plan_type"].(string); got != "plus" {
+		t.Fatalf("metadata plan_type = %q, want plus", got)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(tempDir, "codex-auth.json"))
+	if err != nil {
+		t.Fatalf("read hydrated file: %v", err)
+	}
+	var persisted map[string]any
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("decode hydrated file: %v", err)
+	}
+	if got, _ := persisted["plan_type"].(string); got != "plus" {
+		t.Fatalf("persisted plan_type = %q, want plus", got)
 	}
 }
 
@@ -250,6 +297,12 @@ func TestFileSynthesizer_Synthesize_RelativeID(t *testing.T) {
 	if auths[0].ID != "my-auth.json" {
 		t.Errorf("expected ID my-auth.json, got %s", auths[0].ID)
 	}
+}
+
+func testFileSynthesizerCodexJWT(email, accountID, planType string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"email":"` + email + `","https://api.openai.com/auth":{"chatgpt_account_id":"` + accountID + `","chatgpt_plan_type":"` + planType + `"}}`))
+	return header + "." + payload + ".signature"
 }
 
 func TestFileSynthesizer_Synthesize_PrefixValidation(t *testing.T) {

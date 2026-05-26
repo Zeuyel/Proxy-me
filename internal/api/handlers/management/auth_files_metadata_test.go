@@ -3,6 +3,7 @@ package management
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -109,6 +110,45 @@ func TestUploadAuthFileRecordsImportMetadata(t *testing.T) {
 	}
 }
 
+func TestUploadAuthFilePersistsCodexPlanTypeFromIDToken(t *testing.T) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	h, _, manager := newAuthFilesTestHandler(t, authDir)
+
+	r := gin.New()
+	r.POST("/auth-files", h.UploadAuthFile)
+
+	idToken := testManagementCodexJWT("plus@example.com", "acct_plus", "plus")
+	req := httptest.NewRequest(http.MethodPost, "/auth-files?name=codex-plus.json", bytes.NewBufferString(`{"type":"codex","email":"plus@example.com","id_token":`+managementQuoteJSON(idToken)+`}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body=%s", w.Code, w.Body.String())
+	}
+
+	raw, err := os.ReadFile(filepath.Join(authDir, "codex-plus.json"))
+	if err != nil {
+		t.Fatalf("read uploaded auth file: %v", err)
+	}
+	var persisted map[string]any
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("decode uploaded auth file: %v", err)
+	}
+	if got, _ := persisted["plan_type"].(string); got != "plus" {
+		t.Fatalf("persisted plan_type = %q, want plus", got)
+	}
+	auth, ok := manager.GetByID("codex-plus.json")
+	if !ok || auth == nil {
+		t.Fatalf("expected uploaded auth to be registered")
+	}
+	if got, _ := auth.Metadata["plan_type"].(string); got != "plus" {
+		t.Fatalf("registered plan_type = %q, want plus", got)
+	}
+}
+
 func TestRenameAuthFileMovesMetadataAndReferences(t *testing.T) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -211,4 +251,15 @@ func TestRenameAuthFileMovesMetadataAndReferences(t *testing.T) {
 	if len(payload.Files) != 1 || payload.Files[0]["name"] != "new.json" {
 		t.Fatalf("unexpected list payload: %+v", payload.Files)
 	}
+}
+
+func testManagementCodexJWT(email, accountID, planType string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"email":` + managementQuoteJSON(email) + `,"https://api.openai.com/auth":{"chatgpt_account_id":` + managementQuoteJSON(accountID) + `,"chatgpt_plan_type":` + managementQuoteJSON(planType) + `}}`))
+	return header + "." + payload + ".signature"
+}
+
+func managementQuoteJSON(value string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	return `"` + replacer.Replace(value) + `"`
 }

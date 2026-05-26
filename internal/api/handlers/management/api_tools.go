@@ -241,7 +241,9 @@ func (h *Handler) syncQuotaProbeFromAPICall(ctx context.Context, auth *coreauth.
 		h.authManager.SyncQuotaProbe(ctx, auth.ID, true, reason, recoverAt)
 		return
 	}
-	h.authManager.SyncQuotaProbe(ctx, auth.ID, false, "", time.Time{})
+	if executor.DetectCodexQuotaHasAvailableWindow(respBody) {
+		h.authManager.SyncQuotaProbe(ctx, auth.ID, false, "", time.Time{})
+	}
 }
 
 func isCodexUsageProbeRequest(requestURL *url.URL) bool {

@@ -198,6 +198,8 @@ function isCooldownDisabled(file: AuthFileItem): boolean {
   return false;
 }
 
+const CODEX_QUOTA_USED_PERCENT_EXHAUSTED_THRESHOLD = 99.5;
+
 function resolveQuotaErrorMessage(t: (key: string) => string, status: number | undefined, fallback: string) {
   if (status === 404) return t('common.quota_update_required');
   if (status === 403) return t('common.quota_check_credential');
@@ -916,7 +918,7 @@ export function AuthFilesPage() {
       return (quota.windows ?? []).some((window) => {
         const usedPercent = Number(window.usedPercent);
         if (!Number.isFinite(usedPercent)) return false;
-        return usedPercent < 100;
+        return usedPercent < CODEX_QUOTA_USED_PERCENT_EXHAUSTED_THRESHOLD;
       });
     }
 

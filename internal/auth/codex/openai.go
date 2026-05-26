@@ -23,6 +23,8 @@ type CodexTokenData struct {
 	AccountID string `json:"account_id"`
 	// Email is the OpenAI account email
 	Email string `json:"email"`
+	// PlanType is the ChatGPT/Codex account plan extracted from the ID token.
+	PlanType string `json:"plan_type,omitempty"`
 	// Expire is the timestamp of the token expire
 	Expire string `json:"expired"`
 }

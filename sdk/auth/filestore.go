@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -69,6 +70,8 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("auth filestore: create dir failed: %w", err)
 	}
+	hydrateCodexPlanType(auth.Metadata)
+	syncCodexStoragePlanType(auth)
 
 	switch {
 	case auth.Storage != nil:
@@ -190,6 +193,14 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if err = json.Unmarshal(data, &metadata); err != nil {
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
 	}
+	if hydrateCodexPlanType(metadata) {
+		if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
+			if file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600); errOpen == nil {
+				_, _ = file.Write(raw)
+				_ = file.Close()
+			}
+		}
+	}
 	provider, _ := metadata["type"].(string)
 	if provider == "" {
 		provider = "unknown"
@@ -246,6 +257,69 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		auth.Attributes["email"] = email
 	}
 	return auth, nil
+}
+
+func hydrateCodexPlanType(metadata map[string]any) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	provider, _ := metadata["type"].(string)
+	if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		return false
+	}
+	if planType, _ := metadata["plan_type"].(string); strings.TrimSpace(planType) != "" {
+		return false
+	}
+	for _, key := range []string{"id_token", "access_token", "token"} {
+		raw, _ := metadata[key].(string)
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		claims, err := codexauth.ParseJWTToken(raw)
+		if err != nil || claims == nil {
+			continue
+		}
+		planType := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+		if planType == "" {
+			continue
+		}
+		metadata["plan_type"] = planType
+		return true
+	}
+	return false
+}
+
+func syncCodexStoragePlanType(auth *cliproxyauth.Auth) {
+	if auth == nil || auth.Storage == nil {
+		return
+	}
+	storage, ok := auth.Storage.(*codexauth.CodexTokenStorage)
+	if !ok || storage == nil {
+		return
+	}
+	if auth.Metadata != nil {
+		if planType, _ := auth.Metadata["plan_type"].(string); strings.TrimSpace(planType) != "" {
+			storage.PlanType = strings.TrimSpace(planType)
+			return
+		}
+	}
+	for _, raw := range []string{storage.IDToken, storage.AccessToken} {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		claims, err := codexauth.ParseJWTToken(raw)
+		if err != nil || claims == nil {
+			continue
+		}
+		planType := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+		if planType == "" {
+			continue
+		}
+		storage.PlanType = planType
+		return
+	}
 }
 
 func (s *FileTokenStore) idFor(path, baseDir string) string {
