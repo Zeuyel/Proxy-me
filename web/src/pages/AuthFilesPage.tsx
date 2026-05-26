@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useInterval } from '@/hooks/useInterval';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
@@ -16,7 +16,7 @@ import {
   GEMINI_CLI_CONFIG,
 } from '@/components/quota';
 import { useQuotaLoader } from '@/components/quota/useQuotaLoader';
-import { QuotaProgressBar, type QuotaStatusState } from '@/components/quota/QuotaCard';
+import type { QuotaStatusState } from '@/components/quota/QuotaCard';
 import {
   IconBot,
   IconChevronDown,
@@ -26,6 +26,7 @@ import {
   IconFileText,
   IconInfo,
   IconRefreshCw,
+  IconRotateCcw,
   IconTrash2,
   IconUpload,
   IconX,
@@ -199,12 +200,6 @@ function isCooldownDisabled(file: AuthFileItem): boolean {
 }
 
 const CODEX_QUOTA_USED_PERCENT_EXHAUSTED_THRESHOLD = 99.5;
-
-function resolveQuotaErrorMessage(t: (key: string) => string, status: number | undefined, fallback: string) {
-  if (status === 404) return t('common.quota_update_required');
-  if (status === 403) return t('common.quota_check_credential');
-  return fallback;
-}
 
 function isQuotaTokenInvalidated401(status: number | undefined, message: string | undefined): boolean {
   if (status === 401) return true;
@@ -864,9 +859,9 @@ export function AuthFilesPage() {
 
     const candidates = [
       String(item?.name ?? '').trim(),
-      String((item as any)?.id ?? '').trim(),
-      String((item as any)?.auth_index ?? '').trim(),
-      String((item as any)?.authIndex ?? '').trim(),
+      String(item.id ?? '').trim(),
+      String(item.auth_index ?? '').trim(),
+      String(item.authIndex ?? '').trim(),
     ].filter(Boolean);
 
     let matched = implicitAllApiKeyCount;
@@ -1925,93 +1920,183 @@ export function AuthFilesPage() {
     });
   }, [files, invalidated401FileNames, showConfirmation, showNotification, t]);
 
-  const renderQuotaSectionByState = (
-    i18nPrefix: string,
-    quota: QuotaStatusState | undefined,
-    successContent: ReactNode
+  const renderQuotaRing = (
+    key: string,
+    label: string,
+    percent: number | null,
+    title: string
   ) => {
-    const quotaStatus = quota?.status ?? 'idle';
-    const quotaErrorMessage = resolveQuotaErrorMessage(
-      (key) => t(key),
-      quota?.errorStatus,
-      quota?.error || t('common.unknown_error')
-    );
+    const radius = 15;
+    const circumference = 2 * Math.PI * radius;
+    const normalized = percent === null ? null : Math.max(0, Math.min(100, percent));
+    const dashOffset =
+      normalized === null ? circumference : circumference * (1 - normalized / 100);
+    const ringClass =
+      normalized === null
+        ? styles.quotaRingUnknown
+        : normalized >= 80
+          ? styles.quotaRingHigh
+          : normalized >= 50
+            ? styles.quotaRingMedium
+            : styles.quotaRingLow;
+    const percentText = normalized === null ? '--' : `${Math.round(normalized)}%`;
 
     return (
-      <div className={styles.quotaSection}>
-        {quotaStatus === 'loading' ? (
-          <div className={styles.quotaMessage}>{t(`${i18nPrefix}.loading`)}</div>
-        ) : quotaStatus === 'idle' ? (
-          <div className={styles.quotaMessage}>{t(`${i18nPrefix}.idle`)}</div>
-        ) : quotaStatus === 'error' ? (
-          <div className={styles.quotaError}>
-            {t(`${i18nPrefix}.load_failed`, {
-              message: quotaErrorMessage,
-            })}
-          </div>
-        ) : (
-          successContent
-        )}
+      <div key={key} className={styles.quotaRingItem} title={title}>
+        <svg className={styles.quotaRingSvg} viewBox="0 0 40 40" aria-hidden="true">
+          <circle className={styles.quotaRingTrack} cx="20" cy="20" r={radius} />
+          <circle
+            className={`${styles.quotaRingValue} ${ringClass}`}
+            cx="20"
+            cy="20"
+            r={radius}
+            strokeDasharray={circumference}
+            strokeDashoffset={dashOffset}
+          />
+        </svg>
+        <span className={styles.quotaRingPercent}>{percentText}</span>
+        <span className={styles.quotaRingLabel}>{label}</span>
       </div>
     );
   };
 
-  const renderInlineQuota = (item: AuthFileItem) => {
-    const quotaHelpers = { styles, QuotaProgressBar };
+  const renderCompactQuota = (item: AuthFileItem) => {
+    if (!supportsInlineQuota(item)) {
+      return <span className={styles.tableMuted}>-</span>;
+    }
 
-    if (isAntigravityFile(item)) {
-      const quota = antigravityQuota[item.name] as AntigravityQuotaState | undefined;
-      const content = quota
-        ? ANTIGRAVITY_CONFIG.renderQuotaItems(quota, t, quotaHelpers)
-        : <div className={styles.quotaMessage}>{t('antigravity_quota.idle')}</div>;
-      return renderQuotaSectionByState('antigravity_quota', quota, content);
+    const quota = getQuotaStateForFile(item);
+    const status = quota?.status ?? 'idle';
+    if (status === 'loading') {
+      return (
+        <div className={styles.quotaCompactMessage}>
+          <LoadingSpinner size={14} />
+          <span>{t('common.loading')}</span>
+        </div>
+      );
+    }
+    if (status === 'error') {
+      return (
+        <span className={styles.quotaCompactError} title={quota?.error || t('common.unknown_error')}>
+          ERR
+        </span>
+      );
+    }
+    if (!quota || status === 'idle') {
+      return <span className={styles.tableMuted}>-</span>;
     }
 
     if (isCodexFile(item)) {
-      const quota = codexQuota[item.name] as CodexQuotaState | undefined;
-      const content = quota
-        ? CODEX_CONFIG.renderQuotaItems(quota, t, quotaHelpers)
-        : <div className={styles.quotaMessage}>{t('codex_quota.idle')}</div>;
-      return renderQuotaSectionByState('codex_quota', quota, content);
+      const codex = quota as CodexQuotaState;
+      const windows = codex.windows ?? [];
+      const primary = windows.find((window) => window.id === 'primary') ?? windows[0];
+      const secondary = windows.find((window) => window.id === 'secondary') ?? windows[1];
+      const toRemaining = (usedPercent: number | null | undefined) => {
+        if (usedPercent === null || usedPercent === undefined) return null;
+        const used = Number(usedPercent);
+        if (!Number.isFinite(used)) return null;
+        return Math.max(0, Math.min(100, 100 - used));
+      };
+
+      return (
+        <div className={styles.quotaRingGroup}>
+          {renderQuotaRing(
+            'primary',
+            '5h',
+            toRemaining(primary?.usedPercent),
+            `${primary?.label || t('codex_quota.primary_window')} · ${primary?.resetLabel || '-'}`
+          )}
+          {renderQuotaRing(
+            'secondary',
+            'Week',
+            toRemaining(secondary?.usedPercent),
+            `${secondary?.label || t('codex_quota.secondary_window')} · ${secondary?.resetLabel || '-'}`
+          )}
+        </div>
+      );
+    }
+
+    if (isAntigravityFile(item)) {
+      const antigravity = quota as AntigravityQuotaState;
+      const group = antigravity.groups?.[0];
+      const percent =
+        group?.remainingFraction === null || group?.remainingFraction === undefined
+          ? null
+          : Math.round(Math.max(0, Math.min(1, group.remainingFraction)) * 100);
+      return (
+        <div className={styles.quotaRingGroup}>
+          {renderQuotaRing('antigravity', 'Quota', percent, group?.label || 'Quota')}
+        </div>
+      );
     }
 
     if (isGeminiCliFile(item) && !isRuntimeOnlyAuthFile(item)) {
-      const quota = geminiCliQuota[item.name] as GeminiCliQuotaState | undefined;
-      const content = quota
-        ? GEMINI_CLI_CONFIG.renderQuotaItems(quota, t, quotaHelpers)
-        : <div className={styles.quotaMessage}>{t('gemini_cli_quota.idle')}</div>;
-      return renderQuotaSectionByState('gemini_cli_quota', quota, content);
+      const gemini = quota as GeminiCliQuotaState;
+      const bucket = gemini.buckets?.[0];
+      const percent =
+        bucket?.remainingFraction === null || bucket?.remainingFraction === undefined
+          ? null
+          : Math.round(Math.max(0, Math.min(1, bucket.remainingFraction)) * 100);
+      return (
+        <div className={styles.quotaRingGroup}>
+          {renderQuotaRing('gemini-cli', 'Quota', percent, bucket?.label || 'Quota')}
+        </div>
+      );
     }
 
-    return null;
+    return <span className={styles.tableMuted}>-</span>;
   };
 
-  // 渲染单个认证文件卡片
-  const renderFileCard = (item: AuthFileItem) => {
+  const renderFileRow = (item: AuthFileItem) => {
     const fileStats = resolveAuthFileStats(item, keyStats);
     const isRuntimeOnly = isRuntimeOnlyAuthFile(item);
-      const effectiveDisabled = isEffectiveDisabled(item);
-      const cooldownActive = isCooldownDisabled(item);
-      const disabledReason = resolveDisabledReason(item);
-      const isInvalidated401 = invalidated401FileNames.has(String(item.name || '').trim());
-	    const isAistudio = (item.type || '').toLowerCase() === 'aistudio';
-	    const showModelsButton = !isRuntimeOnly || isAistudio;
-	    const typeColor = getTypeColor(item.type || 'unknown');
-      const showQuotaRefreshButton = supportsInlineQuota(item);
-      const refreshingSingleQuota = quotaRefreshingSingle[item.name] === true;
-      const assignedApiKeyCount = getAuthFileAssignmentCount(item);
-      const displayName = getAuthFileDisplayName(item);
-      const tags = getAuthFileTags(item);
+    const effectiveDisabled = isEffectiveDisabled(item);
+    const cooldownActive = isCooldownDisabled(item);
+    const disabledReason = resolveDisabledReason(item);
+    const isInvalidated401 = invalidated401FileNames.has(String(item.name || '').trim());
+    const isAistudio = (item.type || '').toLowerCase() === 'aistudio';
+    const showModelsButton = !isRuntimeOnly || isAistudio;
+    const typeColor = getTypeColor(item.type || 'unknown');
+    const showQuotaRefreshButton = supportsInlineQuota(item);
+    const refreshingSingleQuota = quotaRefreshingSingle[item.name] === true;
+    const assignedApiKeyCount = getAuthFileAssignmentCount(item);
+    const displayName = getAuthFileDisplayName(item);
+    const tags = getAuthFileTags(item);
 
-	    return (
-	      <div
-	        key={item.name}
-	        className={`${styles.fileCard} ${effectiveDisabled ? styles.fileCardDisabled : ''}`}
-	      >
-	        <div className={styles.cardHeader}>
-	          <span
-	            className={styles.typeBadge}
-	            style={{
+    return (
+      <tr
+        key={item.name}
+        className={`${styles.fileTableRow} ${effectiveDisabled ? styles.fileTableRowDisabled : ''}`}
+      >
+        <td className={styles.fileNameCell}>
+          <div className={styles.tableFileMain}>
+            <span className={styles.fileName}>{item.name}</span>
+            {displayName && displayName !== item.name && (
+              <span className={styles.fileDisplayName}>{displayName}</span>
+            )}
+          </div>
+          <div className={styles.tableFileMeta}>
+            <span>{item.size ? formatFileSize(item.size) : '-'}</span>
+            <span
+              className={`${styles.assignmentTag} ${
+                assignedApiKeyCount > 0 ? styles.assignmentTagAssigned : styles.assignmentTagUnassigned
+              }`}
+            >
+              {assignedApiKeyCount > 0
+                ? t('auth_files.assignment_tag_assigned', { count: assignedApiKeyCount })
+                : t('auth_files.assignment_tag_unassigned')}
+            </span>
+            {tags.map((tag) => (
+              <span key={tag} className={styles.tagPill}>
+                {tag}
+              </span>
+            ))}
+          </div>
+        </td>
+        <td>
+          <span
+            className={styles.typeBadge}
+            style={{
               backgroundColor: typeColor.bg,
               color: typeColor.text,
               ...(typeColor.border ? { border: typeColor.border } : {}),
@@ -2019,113 +2104,94 @@ export function AuthFilesPage() {
           >
             {getTypeLabel(item.type || 'unknown')}
           </span>
-          <span className={styles.fileName}>{item.name}</span>
-        </div>
-        {displayName && displayName !== item.name && (
-          <div className={styles.fileDisplayName}>{displayName}</div>
-        )}
-
-        <div className={styles.cardMeta}>
-          <span>
-            {t('auth_files.imported_at')}: {formatImportedAt(item)}
-          </span>
-          <span>
-            {t('auth_files.file_size')}: {item.size ? formatFileSize(item.size) : '-'}
-          </span>
-          <span>
-            {t('auth_files.file_modified')}: {formatModified(item)}
-          </span>
-        </div>
-
-        <div className={styles.assignmentTagRow}>
-          <span
-            className={`${styles.assignmentTag} ${
-              assignedApiKeyCount > 0 ? styles.assignmentTagAssigned : styles.assignmentTagUnassigned
-            }`}
-          >
-            {assignedApiKeyCount > 0
-              ? t('auth_files.assignment_tag_assigned', { count: assignedApiKeyCount })
-              : t('auth_files.assignment_tag_unassigned')}
-          </span>
-        </div>
-
-        {tags.length > 0 && (
-          <div className={styles.tagRow}>
-            {tags.map((tag) => (
-              <span key={tag} className={styles.tagPill}>
-                {tag}
+        </td>
+        <td className={styles.quotaCell}>{renderCompactQuota(item)}</td>
+        <td className={styles.statusCell}>
+          {isRuntimeOnly ? (
+            <span className={styles.virtualBadge}>{t('auth_files.type_virtual') || '虚拟认证文件'}</span>
+          ) : disabledReason ? (
+            <div className={styles.disabledInfoRow}>
+              <span className={styles.disabledBadge}>
+                {cooldownActive && item.disabled !== true
+                  ? t('auth_files.cooldown_badge')
+                  : t('common.disabled')}
               </span>
-            ))}
-          </div>
-        )}
-
-        {disabledReason && (
-          <div className={styles.disabledInfoRow}>
-            <span className={styles.disabledBadge}>
-              {cooldownActive && item.disabled !== true
-                ? t('auth_files.cooldown_badge')
-                : t('common.disabled')}
-            </span>
-            <span className={styles.disabledReason}>{disabledReason}</span>
-          </div>
-        )}
-
-	        <div className={styles.cardStats}>
-	          <span className={`${styles.statPill} ${styles.statSuccess}`}>
-	            {t('stats.success')}: {fileStats.success}
-	          </span>
-	          <span className={`${styles.statPill} ${styles.statFailure}`}>
-	            {t('stats.failure')}: {fileStats.failure}
-	          </span>
-	        </div>
-
-          {renderInlineQuota(item)}
-
-	        {/* 状态监测栏 */}
-	        {renderStatusBar(item)}
-
-        <div className={styles.cardActions}>
-          {showQuotaRefreshButton && (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => void handleRefreshSingleQuota(item)}
-              className={styles.iconButton}
-              title={t('common.refresh')}
-              disabled={disableControls || quotaRefreshingAll || refreshingSingleQuota}
-            >
-              {refreshingSingleQuota ? (
-                <LoadingSpinner size={14} />
-              ) : (
-                <IconRefreshCw className={styles.actionIcon} size={16} />
-              )}
-            </Button>
+              <span className={styles.disabledReason}>{disabledReason}</span>
+            </div>
+          ) : (
+            <span className={styles.enabledBadge}>{t('common.enabled')}</span>
           )}
-          {!isRuntimeOnly && isInvalidated401 && (
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={() => handleDelete(item.name)}
-              className={styles.iconButton}
-              title={t('auth_files.delete_401_single_button')}
-              disabled={disableControls || deleting401 || deleting === item.name}
-            >
-              {deleting === item.name ? (
-                <LoadingSpinner size={14} />
-              ) : (
-                <IconX className={styles.actionIcon} size={16} />
-              )}
+        </td>
+        <td className={styles.usageCell}>
+          <div className={styles.tableStats}>
+            <span className={`${styles.statPill} ${styles.statSuccess}`}>{fileStats.success}</span>
+            <span className={`${styles.statPill} ${styles.statFailure}`}>{fileStats.failure}</span>
+          </div>
+          {renderStatusBar(item)}
+        </td>
+        <td className={styles.timeCell}>
+          <div>{formatImportedAt(item)}</div>
+          <span>{formatModified(item)}</span>
+        </td>
+        <td className={styles.actionsCell}>
+          <div className={styles.tableActions}>
+            {showQuotaRefreshButton && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void handleRefreshSingleQuota(item)}
+                className={styles.iconButton}
+                title={t('common.refresh')}
+                disabled={disableControls || quotaRefreshingAll || refreshingSingleQuota}
+              >
+                {refreshingSingleQuota ? (
+                  <LoadingSpinner size={14} />
+                ) : (
+                  <IconRefreshCw className={styles.actionIcon} size={16} />
+                )}
+              </Button>
+            )}
+            {cooldownActive && !isRuntimeOnly && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void handleResetCooldown(item)}
+                className={styles.iconButton}
+                title={t('auth_files.reset_cooldown_button')}
+                disabled={disableControls || cooldownResetting[item.name] === true}
+              >
+                {cooldownResetting[item.name] === true ? (
+                  <LoadingSpinner size={14} />
+                ) : (
+                  <IconRotateCcw className={styles.actionIcon} size={16} />
+                )}
+              </Button>
+            )}
+            {!isRuntimeOnly && isInvalidated401 && (
+              <Button
+                variant="danger"
+                size="sm"
+                onClick={() => handleDelete(item.name)}
+                className={styles.iconButton}
+                title={t('auth_files.delete_401_single_button')}
+                disabled={disableControls || deleting401 || deleting === item.name}
+              >
+                {deleting === item.name ? (
+                  <LoadingSpinner size={14} />
+                ) : (
+                  <IconX className={styles.actionIcon} size={16} />
+                )}
               </Button>
             )}
             {showModelsButton && (
               <Button
                 variant="secondary"
-              size="sm"
-              onClick={() => showModels(item)}
-              className={styles.iconButton}
-              title={t('auth_files.models_button', { defaultValue: '模型' })}
-              disabled={disableControls}
-            >
+                size="sm"
+                onClick={() => showModels(item)}
+                className={styles.iconButton}
+                title={t('auth_files.models_button', { defaultValue: '模型' })}
+                disabled={disableControls}
+              >
                 <IconBot className={styles.actionIcon} size={16} />
               </Button>
             )}
@@ -2146,83 +2212,60 @@ export function AuthFilesPage() {
                   size="sm"
                   onClick={() => showDetails(item)}
                   className={styles.iconButton}
-                title={t('common.info', { defaultValue: '关于' })}
-                disabled={disableControls}
-              >
-                <IconInfo className={styles.actionIcon} size={16} />
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => handleDownload(item.name)}
-                className={styles.iconButton}
-                title={t('auth_files.download_button')}
-                disabled={disableControls}
-              >
-                <IconDownload className={styles.actionIcon} size={16} />
-              </Button>
-              {cooldownActive && (
+                  title={t('common.info', { defaultValue: '关于' })}
+                  disabled={disableControls}
+                >
+                  <IconInfo className={styles.actionIcon} size={16} />
+                </Button>
                 <Button
                   variant="secondary"
                   size="sm"
-                  onClick={() => void handleResetCooldown(item)}
+                  onClick={() => handleDownload(item.name)}
                   className={styles.iconButton}
-                  title={t('auth_files.reset_cooldown_button')}
-                  disabled={disableControls || cooldownResetting[item.name] === true}
+                  title={t('auth_files.download_button')}
+                  disabled={disableControls}
                 >
-                  {cooldownResetting[item.name] === true ? (
+                  <IconDownload className={styles.actionIcon} size={16} />
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void openPrefixProxyEditor(item.name)}
+                  className={styles.iconButton}
+                  title={t('auth_files.prefix_proxy_button')}
+                  disabled={disableControls}
+                >
+                  <IconCode className={styles.actionIcon} size={16} />
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={() => handleDelete(item.name)}
+                  className={styles.iconButton}
+                  title={t('auth_files.delete_button')}
+                  disabled={disableControls || deleting401 || deleting === item.name}
+                >
+                  {deleting === item.name ? (
                     <LoadingSpinner size={14} />
                   ) : (
-                    <IconRefreshCw className={styles.actionIcon} size={16} />
+                    <IconTrash2 className={styles.actionIcon} size={16} />
                   )}
                 </Button>
-              )}
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => void openPrefixProxyEditor(item.name)}
-                className={styles.iconButton}
-                title={t('auth_files.prefix_proxy_button')}
-                disabled={disableControls}
-              >
-                <IconCode className={styles.actionIcon} size={16} />
-              </Button>
-              <Button
-                variant="danger"
-                size="sm"
-                onClick={() => handleDelete(item.name)}
-                className={styles.iconButton}
-                title={t('auth_files.delete_button')}
-                disabled={disableControls || deleting401 || deleting === item.name}
-              >
-                {deleting === item.name ? (
-                  <LoadingSpinner size={14} />
-                ) : (
-                  <IconTrash2 className={styles.actionIcon} size={16} />
-                )}
-              </Button>
-            </>
-          )}
-          {!isRuntimeOnly && (
-            <div className={styles.statusToggle}>
-              <ToggleSwitch
-                ariaLabel={t('auth_files.status_toggle_label')}
-                checked={!effectiveDisabled}
-                disabled={disableControls || statusUpdating[item.name] === true || cooldownActive}
-                onChange={(value) => void handleStatusToggle(item, value)}
-              />
-            </div>
-          )}
-          {isRuntimeOnly && (
-            <div className={styles.virtualBadge}>
-              {t('auth_files.type_virtual') || '虚拟认证文件'}
-            </div>
-          )}
-        </div>
-      </div>
+                <div className={styles.statusToggle}>
+                  <ToggleSwitch
+                    ariaLabel={t('auth_files.status_toggle_label')}
+                    checked={!effectiveDisabled}
+                    disabled={disableControls || statusUpdating[item.name] === true || cooldownActive}
+                    onChange={(value) => void handleStatusToggle(item, value)}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+        </td>
+      </tr>
     );
   };
-
   const titleNode = (
     <div className={styles.titleWrapper}>
       <span>{t('auth_files.title_section')}</span>
@@ -2355,7 +2398,7 @@ export function AuthFilesPage() {
           </div>
         </div>
 
-        {/* 卡片网格 */}
+        {/* Auth file list */}
         {loading ? (
           <div className={styles.hint}>{t('common.loading')}</div>
         ) : pageItems.length === 0 ? (
@@ -2364,7 +2407,22 @@ export function AuthFilesPage() {
             description={t('auth_files.search_empty_desc')}
           />
         ) : (
-          <div className={styles.fileGrid}>{pageItems.map(renderFileCard)}</div>
+          <div className={styles.fileTableWrap}>
+            <table className={styles.fileTable}>
+              <thead>
+                <tr>
+                  <th>{t('auth_files.table_file')}</th>
+                  <th>{t('auth_files.table_type')}</th>
+                  <th>{t('auth_files.table_quota')}</th>
+                  <th>{t('auth_files.table_status')}</th>
+                  <th>{t('auth_files.table_usage')}</th>
+                  <th>{t('auth_files.table_time')}</th>
+                  <th>{t('auth_files.table_actions')}</th>
+                </tr>
+              </thead>
+              <tbody>{pageItems.map(renderFileRow)}</tbody>
+            </table>
+          </div>
         )}
       </Card>
 

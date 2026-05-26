@@ -13,9 +13,7 @@
   gap: $spacing-sm;
   padding: $spacing-lg;
   border: 1px solid var(--border-color);
-  background:
-    linear-gradient(135deg, rgba(59, 130, 246, 0.12), rgba(16, 185, 129, 0.08)),
-    var(--bg-primary);
+  background: var(--bg-primary);
   box-shadow: var(--brutal-shadow-sm);
 }
 
@@ -49,6 +47,14 @@
 
 .uploadMenuButton {
   min-width: 132px;
+  white-space: nowrap;
+
+  > span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
 }
 
 .uploadMenuChevron {
@@ -486,6 +492,281 @@
   text-transform: capitalize;
 }
 
+.fileTableWrap {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-primary);
+}
+
+.fileTable {
+  width: 100%;
+  min-width: 1120px;
+  border-collapse: collapse;
+  table-layout: fixed;
+
+  th,
+  td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color);
+    vertical-align: middle;
+    text-align: left;
+  }
+
+  th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background-color: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  tr:last-child td {
+    border-bottom: 0;
+  }
+
+  th:nth-child(1),
+  td:nth-child(1) {
+    width: 30%;
+  }
+
+  th:nth-child(2),
+  td:nth-child(2) {
+    width: 92px;
+  }
+
+  th:nth-child(3),
+  td:nth-child(3) {
+    width: 126px;
+  }
+
+  th:nth-child(4),
+  td:nth-child(4) {
+    width: 172px;
+  }
+
+  th:nth-child(5),
+  td:nth-child(5) {
+    width: 178px;
+  }
+
+  th:nth-child(6),
+  td:nth-child(6) {
+    width: 166px;
+  }
+
+  th:nth-child(7),
+  td:nth-child(7) {
+    width: 292px;
+  }
+}
+
+.fileTableRow {
+  background-color: var(--bg-primary);
+  transition:
+    background-color $transition-fast,
+    opacity $transition-fast;
+
+  &:hover {
+    background-color: var(--bg-secondary);
+  }
+}
+
+.fileTableRowDisabled {
+  opacity: 0.62;
+}
+
+.fileNameCell {
+  min-width: 0;
+}
+
+.tableFileMain {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tableFileMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.tableMuted {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.quotaCell {
+  color: var(--text-secondary);
+}
+
+.quotaRingGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+}
+
+.quotaRingItem {
+  position: relative;
+  display: inline-flex;
+  justify-content: center;
+  width: 42px;
+  height: 48px;
+  color: var(--text-primary);
+}
+
+.quotaRingSvg {
+  width: 40px;
+  height: 40px;
+}
+
+.quotaRingTrack,
+.quotaRingValue {
+  fill: none;
+  stroke-width: 4;
+}
+
+.quotaRingTrack {
+  stroke: var(--bg-tertiary);
+}
+
+.quotaRingValue {
+  transform: rotate(-90deg);
+  transform-origin: 50% 50%;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.2s ease;
+}
+
+.quotaRingUnknown {
+  stroke: var(--text-tertiary);
+  stroke-dasharray: 2 5 !important;
+}
+
+.quotaRingHigh {
+  stroke: var(--success-color, #22c55e);
+}
+
+.quotaRingMedium {
+  stroke: var(--warning-color, #f59e0b);
+}
+
+.quotaRingLow {
+  stroke: var(--danger-color, #ef4444);
+}
+
+.quotaRingPercent {
+  position: absolute;
+  top: 12px;
+  left: 0;
+  width: 42px;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.quotaRingLabel {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 42px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  text-align: center;
+}
+
+.quotaCompactMessage {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.quotaCompactError {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  padding: 4px 8px;
+  border: 1px solid var(--danger-color);
+  border-radius: 999px;
+  color: var(--danger-color);
+  background-color: rgba(239, 68, 68, 0.08);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.statusCell {
+  color: var(--text-secondary);
+}
+
+.enabledBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border: 1px solid var(--success-color, #22c55e);
+  border-radius: 999px;
+  color: var(--success-badge-text, #065f46);
+  background-color: var(--success-badge-bg, #d1fae5);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.usageCell {
+  color: var(--text-secondary);
+}
+
+.tableStats {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.timeCell {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+
+  span {
+    display: block;
+    color: var(--text-tertiary);
+    font-size: 11px;
+  }
+}
+
+.actionsCell {
+  text-align: right;
+}
+
+.tableActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+
+  .statusToggle {
+    margin-left: 2px;
+  }
+}
+
 // 单个认证文件卡片
 .fileCard {
   background-color: var(--bg-primary);
@@ -581,8 +862,8 @@
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: var(--text-primary);
-  background: linear-gradient(135deg, rgba(59, 130, 246, 0.12), rgba(16, 185, 129, 0.12));
-  border: 1px solid rgba(59, 130, 246, 0.18);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
 }
 
 .disabledInfoRow {
