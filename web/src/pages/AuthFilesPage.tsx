@@ -352,6 +352,7 @@ export function AuthFilesPage() {
   const loadingKeyStatsRef = useRef(false);
   const excludedUnsupportedRef = useRef(false);
   const mappingsUnsupportedRef = useRef(false);
+  const autoLoadedQuotaSignatureRef = useRef('');
 
   const normalizeProviderKey = (value: string) => value.trim().toLowerCase();
 
@@ -395,6 +396,29 @@ export function AuthFilesPage() {
     if (isGeminiCliFile(item) && !isRuntimeOnlyAuthFile(item)) return true;
     return false;
   }, []);
+
+  useEffect(() => {
+    if (connectionStatus !== 'connected') {
+      autoLoadedQuotaSignatureRef.current = '';
+      return;
+    }
+    const targets = files.filter((item) => supportsInlineQuota(item));
+    if (targets.length === 0) return;
+    const signature = targets
+      .map((item) =>
+        [
+          item.name,
+          item.type || '',
+          item.auth_index ?? item.authIndex ?? '',
+          item.modified ?? item.modtime ?? '',
+        ].join(':')
+      )
+      .sort()
+      .join('|');
+    if (signature === autoLoadedQuotaSignatureRef.current) return;
+    autoLoadedQuotaSignatureRef.current = signature;
+    void loadInlineQuotas(targets);
+  }, [connectionStatus, files, loadInlineQuotas, supportsInlineQuota]);
 
   useEffect(() => {
     if (!uploadMenuOpen) return;
@@ -520,16 +544,27 @@ export function AuthFilesPage() {
   }, [prefixProxyEditor?.json, prefixProxyEditor?.originalText, prefixProxyUpdatedText]);
 
   // 格式化修改时间
+  const formatCompactDateTime = (value: unknown): string => {
+    const date = parseTimestampValue(value);
+    if (!date) return '-';
+    return date.toLocaleString(undefined, {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+  };
+
   const formatModified = (item: AuthFileItem): string => {
     const raw = item['modtime'] ?? item.modified;
-    const date = parseTimestampValue(raw);
-    return date ? date.toLocaleString() : '-';
+    return formatCompactDateTime(raw);
   };
 
   const formatImportedAt = (item: AuthFileItem): string => {
     const raw = item['imported_at'] ?? item.importedAt ?? item['created_at'];
-    const date = parseTimestampValue(raw);
-    return date ? date.toLocaleString() : '-';
+    return formatCompactDateTime(raw);
   };
 
   const getAuthFileDisplayName = (item: AuthFileItem): string => {

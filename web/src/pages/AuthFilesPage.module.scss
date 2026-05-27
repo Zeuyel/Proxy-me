@@ -509,7 +509,7 @@
   td {
     padding: 10px 12px;
     border-bottom: 1px solid var(--border-color);
-    vertical-align: middle;
+    vertical-align: top;
     text-align: left;
   }
 
@@ -730,6 +730,19 @@
 
 .usageCell {
   color: var(--text-secondary);
+
+  .statusBar {
+    max-width: 154px;
+  }
+
+  .statusBlocks {
+    min-width: 0;
+  }
+
+  .statusRate {
+    padding: 3px 6px;
+    font-size: 11px;
+  }
 }
 
 .tableStats {
@@ -743,6 +756,8 @@
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 
   span {
     display: block;
