@@ -162,3 +162,26 @@
     width: 100%;
   }
 }
+
+.settingFooterRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-md;
+  margin-top: $spacing-md;
+  flex-wrap: wrap;
+}
+
+.statusOk,
+.statusMuted {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.statusOk {
+  color: var(--success-color, #22c55e);
+}
+
+.statusMuted {
+  color: var(--text-tertiary);
+}

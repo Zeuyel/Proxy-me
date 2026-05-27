@@ -10,16 +10,22 @@ export function resolveAuthProvider(file: AuthFileItem): string {
   return String(raw).trim().toLowerCase();
 }
 
+function hasAuthProviderOrType(file: AuthFileItem, expected: string): boolean {
+  const normalized = expected.trim().toLowerCase();
+  const candidates = [file.provider, file.type];
+  return candidates.some((value) => String(value ?? '').trim().toLowerCase() === normalized);
+}
+
 export function isAntigravityFile(file: AuthFileItem): boolean {
-  return resolveAuthProvider(file) === 'antigravity';
+  return hasAuthProviderOrType(file, 'antigravity');
 }
 
 export function isCodexFile(file: AuthFileItem): boolean {
-  return resolveAuthProvider(file) === 'codex';
+  return hasAuthProviderOrType(file, 'codex');
 }
 
 export function isGeminiCliFile(file: AuthFileItem): boolean {
-  return resolveAuthProvider(file) === 'gemini-cli';
+  return hasAuthProviderOrType(file, 'gemini-cli');
 }
 
 export function isRuntimeOnlyAuthFile(file: AuthFileItem): boolean {

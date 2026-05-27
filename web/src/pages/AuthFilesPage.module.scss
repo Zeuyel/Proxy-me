@@ -542,7 +542,7 @@
 
   th:nth-child(3),
   td:nth-child(3) {
-    width: 126px;
+    width: 148px;
   }
 
   th:nth-child(4),
@@ -552,7 +552,7 @@
 
   th:nth-child(5),
   td:nth-child(5) {
-    width: 178px;
+    width: 188px;
   }
 
   th:nth-child(6),
@@ -610,6 +610,7 @@
 
 .quotaCell {
   color: var(--text-secondary);
+  min-width: 0;
 }
 
 .quotaRingGroup {
@@ -617,6 +618,7 @@
   align-items: center;
   gap: 10px;
   min-height: 48px;
+  min-width: 94px;
 }
 
 .quotaRingItem {
@@ -732,14 +734,27 @@
   color: var(--text-secondary);
 
   .statusBar {
-    max-width: 154px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    width: 100%;
+    max-width: 100%;
+    gap: 6px;
+    overflow: hidden;
   }
 
   .statusBlocks {
+    width: 100%;
     min-width: 0;
+    gap: 1px;
+  }
+
+  .statusBlock {
+    min-width: 0;
+    height: 7px;
   }
 
   .statusRate {
+    flex: 0 0 auto;
     padding: 3px 6px;
     font-size: 11px;
   }

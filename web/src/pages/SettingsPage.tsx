@@ -21,7 +21,8 @@ type PendingKey =
   | 'switchPreview'
   | 'usage'
   | 'loggingToFile'
-  | 'wsAuth';
+  | 'wsAuth'
+  | 'uploadKey';
 
 export function SettingsPage() {
   const { t } = useTranslation();
@@ -39,6 +40,8 @@ export function SettingsPage() {
   const [routingStrategy, setRoutingStrategy] = useState('round-robin');
   const [sessionProvidersText, setSessionProvidersText] = useState('');
   const [sessionConfig, setSessionConfig] = useState<SessionRoutingConfig>({ enabled: false });
+  const [uploadKeyValue, setUploadKeyValue] = useState('');
+  const [uploadKeyConfigured, setUploadKeyConfigured] = useState(false);
   const [pending, setPending] = useState<Record<PendingKey, boolean>>({} as Record<PendingKey, boolean>);
   const [error, setError] = useState('');
 
@@ -59,12 +62,20 @@ export function SettingsPage() {
       setLoading(true);
       setError('');
       try {
-        const [configResult, logsResult, prefixResult, routingResult, sessionResult] = await Promise.allSettled([
+        const [
+          configResult,
+          logsResult,
+          prefixResult,
+          routingResult,
+          sessionResult,
+          uploadKeyResult,
+        ] = await Promise.allSettled([
           fetchConfig(),
           configApi.getLogsMaxTotalSizeMb(),
           configApi.getForceModelPrefix(),
           configApi.getRoutingStrategy(),
           configApi.getRoutingSession(),
+          configApi.getRemoteManagementUploadKeyStatus(),
         ]);
 
         if (configResult.status !== 'fulfilled') {
@@ -99,6 +110,10 @@ export function SettingsPage() {
           setSessionConfig(normalized);
           setSessionProvidersText((normalized.providers || []).join(', '));
           updateConfigValue('routing/session', normalized);
+        }
+
+        if (uploadKeyResult.status === 'fulfilled') {
+          setUploadKeyConfigured(Boolean(uploadKeyResult.value?.configured));
         }
       } catch (err: any) {
         setError(err?.message || t('notification.refresh_failed'));
@@ -257,6 +272,39 @@ export function SettingsPage() {
       showNotification(`${t('notification.update_failed')}: ${err?.message || ''}`, 'error');
     } finally {
       setPendingFlag('logsMaxSize', false);
+    }
+  };
+
+  const handleUploadKeyUpdate = async () => {
+    const value = uploadKeyValue.trim();
+    if (!value) {
+      showNotification(t('login.error_invalid'), 'error');
+      return;
+    }
+    setPendingFlag('uploadKey', true);
+    try {
+      await configApi.updateRemoteManagementUploadKey(value);
+      setUploadKeyValue('');
+      setUploadKeyConfigured(true);
+      showNotification(t('notification.upload_key_updated'), 'success');
+    } catch (err: any) {
+      showNotification(`${t('notification.update_failed')}: ${err?.message || ''}`, 'error');
+    } finally {
+      setPendingFlag('uploadKey', false);
+    }
+  };
+
+  const handleUploadKeyClear = async () => {
+    setPendingFlag('uploadKey', true);
+    try {
+      await configApi.clearRemoteManagementUploadKey();
+      setUploadKeyValue('');
+      setUploadKeyConfigured(false);
+      showNotification(t('notification.upload_key_cleared'), 'success');
+    } catch (err: any) {
+      showNotification(`${t('notification.update_failed')}: ${err?.message || ''}`, 'error');
+    } finally {
+      setPendingFlag('uploadKey', false);
     }
   };
 
@@ -464,6 +512,44 @@ export function SettingsPage() {
             disabled={disableControls || loading}
           >
             {t('basic_settings.logs_max_total_size_update')}
+          </Button>
+        </div>
+      </Card>
+
+      <Card title={t('basic_settings.upload_key_title')}>
+        <div className={`${styles.retryRow} ${styles.retryRowAligned} ${styles.retryRowInputGrow}`}>
+          <Input
+            label={t('basic_settings.upload_key_label')}
+            hint={t('basic_settings.upload_key_hint')}
+            type="password"
+            value={uploadKeyValue}
+            onChange={(e) => setUploadKeyValue(e.target.value)}
+            disabled={disableControls || loading || pending.uploadKey}
+            placeholder={t('basic_settings.upload_key_placeholder')}
+            className={styles.retryInput}
+          />
+          <Button
+            className={styles.retryButton}
+            onClick={handleUploadKeyUpdate}
+            loading={pending.uploadKey}
+            disabled={disableControls || loading || !uploadKeyValue.trim()}
+          >
+            {t('basic_settings.upload_key_update')}
+          </Button>
+        </div>
+        <div className={styles.settingFooterRow}>
+          <span className={uploadKeyConfigured ? styles.statusOk : styles.statusMuted}>
+            {uploadKeyConfigured
+              ? t('basic_settings.upload_key_configured')
+              : t('basic_settings.upload_key_not_configured')}
+          </span>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={handleUploadKeyClear}
+            disabled={disableControls || loading || pending.uploadKey || !uploadKeyConfigured}
+          >
+            {t('basic_settings.upload_key_clear')}
           </Button>
         </div>
       </Card>

@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -327,6 +328,53 @@ func (h *Handler) PutProxyURL(c *gin.Context) {
 }
 func (h *Handler) DeleteProxyURL(c *gin.Context) {
 	h.cfg.ProxyURL = ""
+	h.persist(c)
+}
+
+// Remote management upload key. The plaintext key is accepted once, hashed,
+// and never returned by the API.
+func (h *Handler) GetRemoteManagementUploadKey(c *gin.Context) {
+	configured := h != nil && h.cfg != nil && strings.TrimSpace(h.cfg.RemoteManagement.UploadKey) != ""
+	c.JSON(http.StatusOK, gin.H{
+		"configured":            configured,
+		"upload-key-configured": configured,
+	})
+}
+
+func (h *Handler) PutRemoteManagementUploadKey(c *gin.Context) {
+	if h == nil || h.cfg == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
+		return
+	}
+
+	var body struct {
+		Value *string `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	value := strings.TrimSpace(*body.Value)
+	if value == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "upload key cannot be empty"})
+		return
+	}
+	hashed, err := bcrypt.GenerateFromPassword([]byte(value), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash upload key"})
+		return
+	}
+
+	h.cfg.RemoteManagement.UploadKey = string(hashed)
+	h.persist(c)
+}
+
+func (h *Handler) DeleteRemoteManagementUploadKey(c *gin.Context) {
+	if h == nil || h.cfg == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
+		return
+	}
+	h.cfg.RemoteManagement.UploadKey = ""
 	h.persist(c)
 }
 

@@ -21,12 +21,10 @@ import {
   IconBot,
   IconChevronDown,
   IconClipboard,
-  IconCode,
   IconDownload,
   IconFileText,
   IconInfo,
   IconRefreshCw,
-  IconRotateCcw,
   IconTrash2,
   IconUpload,
   IconX,
@@ -130,23 +128,16 @@ interface ModelMappingsFormState {
   mappings: OAuthModelMappingFormEntry[];
 }
 
-interface PrefixProxyEditorState {
-  fileName: string;
-  loading: boolean;
-  saving: boolean;
-  error: string | null;
-  originalText: string;
-  rawText: string;
-  json: Record<string, unknown> | null;
-  prefix: string;
-  proxyUrl: string;
-}
-
 interface AuthFileMetadataEditorState {
   originalName: string;
   fileName: string;
   displayName: string;
   tagsText: string;
+  loadingFile: boolean;
+  fileError: string | null;
+  originalJsonText: string;
+  jsonText: string;
+  json: Record<string, unknown> | null;
   saving: boolean;
 }
 
@@ -339,7 +330,6 @@ export function AuthFilesPage() {
   const [mappingModelsError, setMappingModelsError] = useState<'unsupported' | null>(null);
   const [savingMappings, setSavingMappings] = useState(false);
 
-  const [prefixProxyEditor, setPrefixProxyEditor] = useState<PrefixProxyEditorState | null>(null);
   const [metadataEditor, setMetadataEditor] = useState<AuthFileMetadataEditorState | null>(null);
   const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
   const [pasteModalOpen, setPasteModalOpen] = useState(false);
@@ -519,29 +509,6 @@ export function AuthFilesPage() {
       cancelled = true;
     };
   }, [mappingModalOpen, mappingModelsFileName, showNotification, t]);
-
-  const prefixProxyUpdatedText = useMemo(() => {
-    if (!prefixProxyEditor?.json) return prefixProxyEditor?.rawText ?? '';
-    const next: Record<string, unknown> = { ...prefixProxyEditor.json };
-    if ('prefix' in next || prefixProxyEditor.prefix.trim()) {
-      next.prefix = prefixProxyEditor.prefix;
-    }
-    if ('proxy_url' in next || prefixProxyEditor.proxyUrl.trim()) {
-      next.proxy_url = prefixProxyEditor.proxyUrl;
-    }
-    return JSON.stringify(next);
-  }, [
-    prefixProxyEditor?.json,
-    prefixProxyEditor?.prefix,
-    prefixProxyEditor?.proxyUrl,
-    prefixProxyEditor?.rawText,
-  ]);
-
-  const prefixProxyDirty = useMemo(() => {
-    if (!prefixProxyEditor?.json) return false;
-    if (!prefixProxyEditor.originalText) return false;
-    return prefixProxyUpdatedText !== prefixProxyEditor.originalText;
-  }, [prefixProxyEditor?.json, prefixProxyEditor?.originalText, prefixProxyUpdatedText]);
 
   // 格式化修改时间
   const formatCompactDateTime = (value: unknown): string => {
@@ -1150,7 +1117,7 @@ export function AuthFilesPage() {
     }
   };
 
-  const openMetadataEditor = (item: AuthFileItem) => {
+  const openMetadataEditor = async (item: AuthFileItem) => {
     const name = String(item.name || '').trim();
     if (!name) return;
     setMetadataEditor({
@@ -1158,7 +1125,107 @@ export function AuthFilesPage() {
       fileName: name,
       displayName: getAuthFileDisplayName(item),
       tagsText: getAuthFileTags(item).join(', '),
+      loadingFile: true,
+      fileError: null,
+      originalJsonText: '',
+      jsonText: '',
+      json: null,
       saving: false,
+    });
+
+    try {
+      const rawText = await authFilesApi.downloadText(name);
+      const trimmed = rawText.trim();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed) as unknown;
+      } catch {
+        setMetadataEditor((prev) => {
+          if (!prev || prev.originalName !== name) return prev;
+          return {
+            ...prev,
+            loadingFile: false,
+            fileError: t('auth_files.prefix_proxy_invalid_json'),
+            originalJsonText: trimmed,
+            jsonText: trimmed,
+            json: null,
+          };
+        });
+        return;
+      }
+
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        setMetadataEditor((prev) => {
+          if (!prev || prev.originalName !== name) return prev;
+          return {
+            ...prev,
+            loadingFile: false,
+            fileError: t('auth_files.prefix_proxy_invalid_json'),
+            originalJsonText: trimmed,
+            jsonText: trimmed,
+            json: null,
+          };
+        });
+        return;
+      }
+
+      const json = parsed as Record<string, unknown>;
+      const formatted = JSON.stringify(json, null, 2);
+      setMetadataEditor((prev) => {
+        if (!prev || prev.originalName !== name) return prev;
+        return {
+          ...prev,
+          loadingFile: false,
+          fileError: null,
+          originalJsonText: formatted,
+          jsonText: formatted,
+          json,
+        };
+      });
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : t('notification.download_failed');
+      setMetadataEditor((prev) => {
+        if (!prev || prev.originalName !== name) return prev;
+        return {
+          ...prev,
+          loadingFile: false,
+          fileError: errorMessage,
+          originalJsonText: '',
+          jsonText: '',
+          json: null,
+        };
+      });
+      showNotification(`${t('notification.download_failed')}: ${errorMessage}`, 'error');
+    }
+  };
+
+  const handleMetadataJsonChange = (value: string) => {
+    setMetadataEditor((prev) => {
+      if (!prev) return prev;
+      try {
+        const parsed = JSON.parse(value) as unknown;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          return {
+            ...prev,
+            jsonText: value,
+            json: null,
+            fileError: t('auth_files.prefix_proxy_invalid_json'),
+          };
+        }
+        return {
+          ...prev,
+          jsonText: value,
+          json: parsed as Record<string, unknown>,
+          fileError: null,
+        };
+      } catch {
+        return {
+          ...prev,
+          jsonText: value,
+          json: null,
+          fileError: t('auth_files.prefix_proxy_invalid_json'),
+        };
+      }
     });
   };
 
@@ -1168,14 +1235,43 @@ export function AuthFilesPage() {
     const nextName = normalizeAuthFileNameInput(metadataEditor.fileName);
     const displayName = metadataEditor.displayName.trim();
     const tags = splitTagsText(metadataEditor.tagsText);
+    const sourceDirty = metadataEditor.jsonText !== metadataEditor.originalJsonText;
 
     if (!originalName || !nextName) {
       showNotification(t('auth_files.metadata_name_required'), 'error');
       return;
     }
+    if (metadataEditor.loadingFile) {
+      showNotification(t('auth_files.prefix_proxy_loading'), 'warning');
+      return;
+    }
+    if (sourceDirty) {
+      try {
+        const parsed = JSON.parse(metadataEditor.jsonText) as unknown;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          showNotification(t('auth_files.prefix_proxy_invalid_json'), 'error');
+          return;
+        }
+      } catch {
+        showNotification(t('auth_files.prefix_proxy_invalid_json'), 'error');
+        return;
+      }
+      const fileSize = new Blob([metadataEditor.jsonText]).size;
+      if (fileSize > MAX_AUTH_FILE_SIZE) {
+        showNotification(
+          t('auth_files.upload_error_size', { maxSize: formatFileSize(MAX_AUTH_FILE_SIZE) }),
+          'error'
+        );
+        return;
+      }
+    }
 
     setMetadataEditor((prev) => (prev ? { ...prev, saving: true } : prev));
     try {
+      if (sourceDirty) {
+        const file = new File([metadataEditor.jsonText], originalName, { type: 'application/json' });
+        await authFilesApi.upload(file);
+      }
       if (nextName !== originalName) {
         await authFilesApi.rename(originalName, nextName);
       }
@@ -1184,6 +1280,11 @@ export function AuthFilesPage() {
         tags,
       });
       showNotification(t('auth_files.metadata_save_success'), 'success');
+      modelsCacheRef.current.delete(originalName);
+      if (nextName !== originalName) {
+        modelsCacheRef.current.delete(nextName);
+      }
+      autoLoadedQuotaSignatureRef.current = '';
       setMetadataEditor(null);
       await loadFiles();
       await loadKeyStats();
@@ -1312,134 +1413,12 @@ export function AuthFilesPage() {
     }
   };
 
-  const openPrefixProxyEditor = async (name: string) => {
-    if (disableControls) return;
-    if (prefixProxyEditor?.fileName === name) {
-      setPrefixProxyEditor(null);
-      return;
-    }
-
-    setPrefixProxyEditor({
-      fileName: name,
-      loading: true,
-      saving: false,
-      error: null,
-      originalText: '',
-      rawText: '',
-      json: null,
-      prefix: '',
-      proxyUrl: '',
-    });
-
-    try {
-      const rawText = await authFilesApi.downloadText(name);
-      const trimmed = rawText.trim();
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(trimmed) as unknown;
-      } catch {
-        setPrefixProxyEditor((prev) => {
-          if (!prev || prev.fileName !== name) return prev;
-          return {
-            ...prev,
-            loading: false,
-            error: t('auth_files.prefix_proxy_invalid_json'),
-            rawText: trimmed,
-            originalText: trimmed,
-          };
-        });
-        return;
-      }
-
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        setPrefixProxyEditor((prev) => {
-          if (!prev || prev.fileName !== name) return prev;
-          return {
-            ...prev,
-            loading: false,
-            error: t('auth_files.prefix_proxy_invalid_json'),
-            rawText: trimmed,
-            originalText: trimmed,
-          };
-        });
-        return;
-      }
-
-      const json = parsed as Record<string, unknown>;
-      const originalText = JSON.stringify(json);
-      const prefix = typeof json.prefix === 'string' ? json.prefix : '';
-      const proxyUrl = typeof json.proxy_url === 'string' ? json.proxy_url : '';
-
-      setPrefixProxyEditor((prev) => {
-        if (!prev || prev.fileName !== name) return prev;
-        return {
-          ...prev,
-          loading: false,
-          originalText,
-          rawText: originalText,
-          json,
-          prefix,
-          proxyUrl,
-          error: null,
-        };
-      });
-    } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : t('notification.download_failed');
-      setPrefixProxyEditor((prev) => {
-        if (!prev || prev.fileName !== name) return prev;
-        return { ...prev, loading: false, error: errorMessage, rawText: '' };
-      });
-      showNotification(`${t('notification.download_failed')}: ${errorMessage}`, 'error');
-    }
-  };
-
-  const handlePrefixProxyChange = (field: 'prefix' | 'proxyUrl', value: string) => {
-    setPrefixProxyEditor((prev) => {
-      if (!prev) return prev;
-      if (field === 'prefix') return { ...prev, prefix: value };
-      return { ...prev, proxyUrl: value };
-    });
-  };
-
-  const handlePrefixProxySave = async () => {
-    if (!prefixProxyEditor?.json) return;
-    if (!prefixProxyDirty) return;
-
-    const name = prefixProxyEditor.fileName;
-    const payload = prefixProxyUpdatedText;
-    const fileSize = new Blob([payload]).size;
-    if (fileSize > MAX_AUTH_FILE_SIZE) {
-      showNotification(
-        t('auth_files.upload_error_size', { maxSize: formatFileSize(MAX_AUTH_FILE_SIZE) }),
-        'error'
-      );
-      return;
-    }
-
-    setPrefixProxyEditor((prev) => {
-      if (!prev || prev.fileName !== name) return prev;
-      return { ...prev, saving: true };
-    });
-
-    try {
-      const file = new File([payload], name, { type: 'application/json' });
-      await authFilesApi.upload(file);
-      showNotification(t('auth_files.prefix_proxy_saved_success', { name }), 'success');
-      await loadFiles();
-      await loadKeyStats();
-      setPrefixProxyEditor(null);
-    } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : '';
-      showNotification(`${t('notification.upload_failed')}: ${errorMessage}`, 'error');
-      setPrefixProxyEditor((prev) => {
-        if (!prev || prev.fileName !== name) return prev;
-        return { ...prev, saving: false };
-      });
-    }
-  };
-
   const handleStatusToggle = async (item: AuthFileItem, enabled: boolean) => {
+    if (enabled && isCooldownDisabled(item) && item.disabled !== true) {
+      await handleResetCooldown(item);
+      return;
+    }
+
     const name = item.name;
     const nextDisabled = !enabled;
     const previousDisabled = item.disabled === true;
@@ -2018,6 +1997,24 @@ export function AuthFilesPage() {
       );
     }
     if (!quota || status === 'idle') {
+      if (isCodexFile(item)) {
+        return (
+          <div className={styles.quotaRingGroup}>
+            {renderQuotaRing(
+              'primary',
+              '5h',
+              null,
+              `${t('codex_quota.primary_window')} · ${t('common.loading')}`
+            )}
+            {renderQuotaRing(
+              'secondary',
+              'Week',
+              null,
+              `${t('codex_quota.secondary_window')} · ${t('common.loading')}`
+            )}
+          </div>
+        );
+      }
       return <span className={styles.tableMuted}>-</span>;
     }
 
@@ -2186,22 +2183,6 @@ export function AuthFilesPage() {
                 )}
               </Button>
             )}
-            {cooldownActive && !isRuntimeOnly && (
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => void handleResetCooldown(item)}
-                className={styles.iconButton}
-                title={t('auth_files.reset_cooldown_button')}
-                disabled={disableControls || cooldownResetting[item.name] === true}
-              >
-                {cooldownResetting[item.name] === true ? (
-                  <LoadingSpinner size={14} />
-                ) : (
-                  <IconRotateCcw className={styles.actionIcon} size={16} />
-                )}
-              </Button>
-            )}
             {!isRuntimeOnly && isInvalidated401 && (
               <Button
                 variant="danger"
@@ -2235,7 +2216,7 @@ export function AuthFilesPage() {
                 <Button
                   variant="secondary"
                   size="sm"
-                  onClick={() => openMetadataEditor(item)}
+                  onClick={() => void openMetadataEditor(item)}
                   className={styles.iconButton}
                   title={t('auth_files.metadata_button')}
                   disabled={disableControls}
@@ -2263,16 +2244,6 @@ export function AuthFilesPage() {
                   <IconDownload className={styles.actionIcon} size={16} />
                 </Button>
                 <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => void openPrefixProxyEditor(item.name)}
-                  className={styles.iconButton}
-                  title={t('auth_files.prefix_proxy_button')}
-                  disabled={disableControls}
-                >
-                  <IconCode className={styles.actionIcon} size={16} />
-                </Button>
-                <Button
                   variant="danger"
                   size="sm"
                   onClick={() => handleDelete(item.name)}
@@ -2290,7 +2261,11 @@ export function AuthFilesPage() {
                   <ToggleSwitch
                     ariaLabel={t('auth_files.status_toggle_label')}
                     checked={!effectiveDisabled}
-                    disabled={disableControls || statusUpdating[item.name] === true || cooldownActive}
+                    disabled={
+                      disableControls ||
+                      statusUpdating[item.name] === true ||
+                      cooldownResetting[item.name] === true
+                    }
                     onChange={(value) => void handleStatusToggle(item, value)}
                   />
                 </div>
@@ -2510,7 +2485,7 @@ export function AuthFilesPage() {
           setMetadataEditor(null);
         }}
         closeDisabled={metadataEditor?.saving === true}
-        width={720}
+        width={840}
         title={t('auth_files.metadata_title')}
         footer={
           <>
@@ -2524,7 +2499,16 @@ export function AuthFilesPage() {
             <Button
               onClick={() => void handleMetadataSave()}
               loading={metadataEditor?.saving === true}
-              disabled={disableControls || metadataEditor?.saving === true}
+              disabled={
+                disableControls ||
+                metadataEditor?.saving === true ||
+                metadataEditor?.loadingFile === true ||
+                Boolean(
+                  metadataEditor &&
+                    metadataEditor.jsonText !== metadataEditor.originalJsonText &&
+                    !metadataEditor.json
+                )
+              }
             >
               {t('common.save')}
             </Button>
@@ -2566,6 +2550,30 @@ export function AuthFilesPage() {
                 disabled={metadataEditor.saving}
               />
               <div className={styles.hint}>{t('auth_files.metadata_tags_hint')}</div>
+            </div>
+            <div className={styles.prefixProxyJsonWrapper}>
+              <label className={styles.prefixProxyLabel}>
+                {t('auth_files.prefix_proxy_source_label')}
+              </label>
+              {metadataEditor.loadingFile ? (
+                <div className={styles.prefixProxyLoading}>
+                  <LoadingSpinner size={14} />
+                  <span>{t('auth_files.prefix_proxy_loading')}</span>
+                </div>
+              ) : (
+                <>
+                  {metadataEditor.fileError && (
+                    <div className={styles.prefixProxyError}>{metadataEditor.fileError}</div>
+                  )}
+                  <textarea
+                    className={styles.prefixProxyTextarea}
+                    rows={16}
+                    value={metadataEditor.jsonText}
+                    onChange={(e) => handleMetadataJsonChange(e.target.value)}
+                    disabled={metadataEditor.saving}
+                  />
+                </>
+              )}
             </div>
           </div>
         )}
@@ -2762,89 +2770,6 @@ export function AuthFilesPage() {
                 </div>
               );
             })}
-          </div>
-        )}
-      </Modal>
-
-      {/* prefix/proxy_url 编辑弹窗 */}
-      <Modal
-        open={Boolean(prefixProxyEditor)}
-        onClose={() => setPrefixProxyEditor(null)}
-        closeDisabled={prefixProxyEditor?.saving === true}
-        width={720}
-        title={
-          prefixProxyEditor?.fileName
-            ? `${t('auth_files.prefix_proxy_button')} - ${prefixProxyEditor.fileName}`
-            : t('auth_files.prefix_proxy_button')
-        }
-        footer={
-          <>
-            <Button
-              variant="secondary"
-              onClick={() => setPrefixProxyEditor(null)}
-              disabled={prefixProxyEditor?.saving === true}
-            >
-              {t('common.cancel')}
-            </Button>
-            <Button
-              onClick={() => void handlePrefixProxySave()}
-              loading={prefixProxyEditor?.saving === true}
-              disabled={
-                disableControls ||
-                prefixProxyEditor?.saving === true ||
-                !prefixProxyDirty ||
-                !prefixProxyEditor?.json
-              }
-            >
-              {t('common.save')}
-            </Button>
-          </>
-        }
-      >
-        {prefixProxyEditor && (
-          <div className={styles.prefixProxyEditor}>
-            {prefixProxyEditor.loading ? (
-              <div className={styles.prefixProxyLoading}>
-                <LoadingSpinner size={14} />
-                <span>{t('auth_files.prefix_proxy_loading')}</span>
-              </div>
-            ) : (
-              <>
-                {prefixProxyEditor.error && (
-                  <div className={styles.prefixProxyError}>{prefixProxyEditor.error}</div>
-                )}
-                <div className={styles.prefixProxyJsonWrapper}>
-                  <label className={styles.prefixProxyLabel}>
-                    {t('auth_files.prefix_proxy_source_label')}
-                  </label>
-                  <textarea
-                    className={styles.prefixProxyTextarea}
-                    rows={10}
-                    readOnly
-                    value={prefixProxyUpdatedText}
-                  />
-                </div>
-                <div className={styles.prefixProxyFields}>
-                  <Input
-                    label={t('auth_files.prefix_label')}
-                    value={prefixProxyEditor.prefix}
-                    disabled={
-                      disableControls || prefixProxyEditor.saving || !prefixProxyEditor.json
-                    }
-                    onChange={(e) => handlePrefixProxyChange('prefix', e.target.value)}
-                  />
-                  <Input
-                    label={t('auth_files.proxy_url_label')}
-                    value={prefixProxyEditor.proxyUrl}
-                    placeholder={t('auth_files.proxy_url_placeholder')}
-                    disabled={
-                      disableControls || prefixProxyEditor.saving || !prefixProxyEditor.json
-                    }
-                    onChange={(e) => handlePrefixProxyChange('proxyUrl', e.target.value)}
-                  />
-                </div>
-              </>
-            )}
           </div>
         )}
       </Modal>

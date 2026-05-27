@@ -267,8 +267,19 @@ func hydrateCodexPlanType(metadata map[string]any) bool {
 	if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
 		return false
 	}
-	if planType, _ := metadata["plan_type"].(string); strings.TrimSpace(planType) != "" {
+	existing, _ := metadata["plan_type"].(string)
+	existing = strings.TrimSpace(existing)
+	planType := codexPlanTypeFromMetadataTokens(metadata)
+	if planType == "" || strings.EqualFold(existing, planType) {
 		return false
+	}
+	metadata["plan_type"] = planType
+	return true
+}
+
+func codexPlanTypeFromMetadataTokens(metadata map[string]any) string {
+	if len(metadata) == 0 {
+		return ""
 	}
 	for _, key := range []string{"id_token", "access_token", "token"} {
 		raw, _ := metadata[key].(string)
@@ -284,10 +295,14 @@ func hydrateCodexPlanType(metadata map[string]any) bool {
 		if planType == "" {
 			continue
 		}
-		metadata["plan_type"] = planType
-		return true
+		// access_token may report stale "free" for paid accounts. Only persist
+		// free when it comes from the ID token.
+		if key != "id_token" && strings.EqualFold(planType, "free") {
+			continue
+		}
+		return planType
 	}
-	return false
+	return ""
 }
 
 func syncCodexStoragePlanType(auth *cliproxyauth.Auth) {
@@ -304,8 +319,14 @@ func syncCodexStoragePlanType(auth *cliproxyauth.Auth) {
 			return
 		}
 	}
-	for _, raw := range []string{storage.IDToken, storage.AccessToken} {
-		raw = strings.TrimSpace(raw)
+	for _, item := range []struct {
+		key string
+		raw string
+	}{
+		{key: "id_token", raw: storage.IDToken},
+		{key: "access_token", raw: storage.AccessToken},
+	} {
+		raw := strings.TrimSpace(item.raw)
 		if raw == "" {
 			continue
 		}
@@ -315,6 +336,9 @@ func syncCodexStoragePlanType(auth *cliproxyauth.Auth) {
 		}
 		planType := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
 		if planType == "" {
+			continue
+		}
+		if item.key != "id_token" && strings.EqualFold(planType, "free") {
 			continue
 		}
 		storage.PlanType = planType

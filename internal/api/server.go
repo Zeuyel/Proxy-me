@@ -530,6 +530,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/proxy-url", s.mgmt.PutProxyURL)
 		mgmt.DELETE("/proxy-url", s.mgmt.DeleteProxyURL)
 
+		mgmt.GET("/remote-management/upload-key", s.mgmt.GetRemoteManagementUploadKey)
+		mgmt.PUT("/remote-management/upload-key", s.mgmt.PutRemoteManagementUploadKey)
+		mgmt.PATCH("/remote-management/upload-key", s.mgmt.PutRemoteManagementUploadKey)
+		mgmt.DELETE("/remote-management/upload-key", s.mgmt.DeleteRemoteManagementUploadKey)
+
 		// Reverse proxy management
 		mgmt.GET("/reverse-proxies", s.mgmt.GetReverseProxies)
 		mgmt.POST("/reverse-proxies", s.mgmt.CreateReverseProxy)

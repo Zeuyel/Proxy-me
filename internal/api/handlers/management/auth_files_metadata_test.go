@@ -149,6 +149,45 @@ func TestUploadAuthFilePersistsCodexPlanTypeFromIDToken(t *testing.T) {
 	}
 }
 
+func TestUploadAuthFileDoesNotPersistFreePlanTypeFromAccessToken(t *testing.T) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	h, _, manager := newAuthFilesTestHandler(t, authDir)
+	r := gin.New()
+	r.POST("/auth-files", h.UploadAuthFile)
+
+	accessToken := testManagementCodexJWT("plus@example.com", "acct_plus", "free")
+	idTokenJSON := `{"chatgpt_account_id":"acct_plus","chatgpt_plan_type":"free"}`
+	req := httptest.NewRequest(http.MethodPost, "/auth-files?name=codex-plus.json", bytes.NewBufferString(`{"type":"codex","email":"plus@example.com","id_token":`+managementQuoteJSON(idTokenJSON)+`,"access_token":`+managementQuoteJSON(accessToken)+`}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body=%s", w.Code, w.Body.String())
+	}
+
+	raw, err := os.ReadFile(filepath.Join(authDir, "codex-plus.json"))
+	if err != nil {
+		t.Fatalf("read uploaded auth file: %v", err)
+	}
+	var persisted map[string]any
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("decode uploaded auth file: %v", err)
+	}
+	if got, ok := persisted["plan_type"].(string); ok && got != "" {
+		t.Fatalf("persisted plan_type = %q, want empty", got)
+	}
+	auth, ok := manager.GetByID("codex-plus.json")
+	if !ok || auth == nil {
+		t.Fatalf("expected uploaded auth to be registered")
+	}
+	if got, ok := auth.Metadata["plan_type"].(string); ok && got != "" {
+		t.Fatalf("registered plan_type = %q, want empty", got)
+	}
+}
+
 func TestRenameAuthFileMovesMetadataAndReferences(t *testing.T) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)

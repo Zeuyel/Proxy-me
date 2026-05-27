@@ -811,8 +811,19 @@ func hydrateCodexPlanType(metadata map[string]any) bool {
 	if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
 		return false
 	}
-	if planType, _ := metadata["plan_type"].(string); strings.TrimSpace(planType) != "" {
+	existing, _ := metadata["plan_type"].(string)
+	existing = strings.TrimSpace(existing)
+	planType := codexPlanTypeFromMetadataTokens(metadata)
+	if planType == "" || strings.EqualFold(existing, planType) {
 		return false
+	}
+	metadata["plan_type"] = planType
+	return true
+}
+
+func codexPlanTypeFromMetadataTokens(metadata map[string]any) string {
+	if len(metadata) == 0 {
+		return ""
 	}
 	for _, key := range []string{"id_token", "access_token", "token"} {
 		raw, _ := metadata[key].(string)
@@ -828,10 +839,14 @@ func hydrateCodexPlanType(metadata map[string]any) bool {
 		if planType == "" {
 			continue
 		}
-		metadata["plan_type"] = planType
-		return true
+		// access_token has been observed to carry stale "free" values for paid
+		// accounts. Persist free only when it comes from the ID token.
+		if key != "id_token" && strings.EqualFold(planType, "free") {
+			continue
+		}
+		return planType
 	}
-	return false
+	return ""
 }
 
 func resolveCodexAccountID(auth *coreauth.Auth) string {

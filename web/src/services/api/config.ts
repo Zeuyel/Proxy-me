@@ -47,6 +47,11 @@ const toSessionRoutingPayload = (session: SessionRoutingConfig): Record<string, 
   'penalty-status-5xx': session.penaltyStatus5xx,
 });
 
+export type RemoteManagementUploadKeyStatus = {
+  configured: boolean;
+  'upload-key-configured'?: boolean;
+};
+
 export const configApi = {
   /**
    * 获取配置（会进行字段规范化）
@@ -75,6 +80,26 @@ export const configApi = {
    * 清除代理 URL
    */
   clearProxyUrl: () => apiClient.delete('/proxy-url'),
+
+  /**
+   * 获取 auth file 上传专用 key 配置状态（不会返回密钥内容）
+   */
+  async getRemoteManagementUploadKeyStatus(): Promise<RemoteManagementUploadKeyStatus> {
+    const data = await apiClient.get('/remote-management/upload-key');
+    const configured = Boolean(data?.configured ?? data?.['upload-key-configured']);
+    return { configured, 'upload-key-configured': configured };
+  },
+
+  /**
+   * 更新 auth file 上传专用 key。服务端只保存哈希。
+   */
+  updateRemoteManagementUploadKey: (value: string) =>
+    apiClient.put('/remote-management/upload-key', { value }),
+
+  /**
+   * 清除 auth file 上传专用 key。
+   */
+  clearRemoteManagementUploadKey: () => apiClient.delete('/remote-management/upload-key'),
 
   /**
    * 更新重试次数

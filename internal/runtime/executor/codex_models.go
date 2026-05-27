@@ -172,6 +172,9 @@ func codexPlanType(auth *cliproxyauth.Auth) string {
 				continue
 			}
 			if planType := normalizeCodexAccessValue(claims.CodexAuthInfo.ChatgptPlanType); planType != "" {
+				if key != "id_token" && planType == "free" {
+					continue
+				}
 				return planType
 			}
 		}
