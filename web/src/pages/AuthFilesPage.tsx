@@ -211,6 +211,52 @@ function hasPositiveNumber(value: unknown): boolean {
   return Number.isFinite(num) && num > 0;
 }
 
+function normalizeAuthFileUsageTotal(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function statusBarDataFromAuthFileRecentRequests(
+  buckets: unknown
+): ReturnType<typeof calculateStatusBarData> | null {
+  if (!Array.isArray(buckets)) return null;
+  const normalized = buckets.slice(-20).map((item) => {
+    const record = item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
+    return {
+      success: normalizeAuthFileUsageTotal(record.success),
+      failure: normalizeAuthFileUsageTotal(record.failed),
+    };
+  });
+  if (normalized.length === 0) return null;
+
+  const emptyCount = Math.max(0, 20 - normalized.length);
+  const blockStats = [
+    ...Array.from({ length: emptyCount }, () => ({ success: 0, failure: 0 })),
+    ...normalized,
+  ];
+  let totalSuccess = 0;
+  let totalFailure = 0;
+  const blocks = blockStats.map((stat) => {
+    totalSuccess += stat.success;
+    totalFailure += stat.failure;
+    if (stat.success === 0 && stat.failure === 0) return 'idle';
+    if (stat.failure === 0) return 'success';
+    if (stat.success === 0) return 'failure';
+    return 'mixed';
+  });
+  const total = totalSuccess + totalFailure;
+  return {
+    blocks,
+    successRate: total > 0 ? (totalSuccess / total) * 100 : 100,
+    totalSuccess,
+    totalFailure,
+  };
+}
+
 // 解析认证文件的统计数据
 function resolveAuthFileStats(file: AuthFileItem, stats: KeyStats): KeyStatBucket {
   const defaultStats: KeyStatBucket = { success: 0, failure: 0 };
@@ -247,6 +293,12 @@ function resolveAuthFileStats(file: AuthFileItem, stats: KeyStats): KeyStatBucke
         return fromNameWithoutExt;
       }
     }
+  }
+
+  const fileSuccess = normalizeAuthFileUsageTotal(file.success);
+  const fileFailure = normalizeAuthFileUsageTotal(file.failed);
+  if (fileSuccess > 0 || fileFailure > 0) {
+    return { success: fileSuccess, failure: fileFailure };
   }
 
   return defaultStats;
@@ -1835,7 +1887,15 @@ export function AuthFilesPage() {
           const detailAuthIndex = normalizeAuthIndexValue(detail.auth_index);
           return detailAuthIndex !== null && detailAuthIndex === authIndexKey;
         });
-        cache.set(authIndexKey, calculateStatusBarData(filteredDetails));
+        const recentStatus = statusBarDataFromAuthFileRecentRequests(
+          file.recent_requests ?? file.recentRequests
+        );
+        cache.set(
+          authIndexKey,
+          filteredDetails.length > 0
+            ? calculateStatusBarData(filteredDetails)
+            : recentStatus || calculateStatusBarData([])
+        );
       }
     });
 

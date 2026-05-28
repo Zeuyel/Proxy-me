@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -114,6 +115,25 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
+		if rawPriority, ok := metadata["priority"]; ok {
+			switch v := rawPriority.(type) {
+			case float64:
+				a.Attributes["priority"] = strconv.Itoa(int(v))
+			case string:
+				priority := strings.TrimSpace(v)
+				if _, errAtoi := strconv.Atoi(priority); errAtoi == nil {
+					a.Attributes["priority"] = priority
+				}
+			}
+		}
+		if rawNote, ok := metadata["note"]; ok {
+			if note, isStr := rawNote.(string); isStr {
+				if trimmed := strings.TrimSpace(note); trimmed != "" {
+					a.Attributes["note"] = trimmed
+				}
+			}
+		}
+		coreauth.ApplyCustomHeadersFromMetadata(a)
 		ApplyAuthExcludedModelsMeta(a, cfg, nil, "oauth")
 		if provider == "gemini-cli" {
 			if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {

@@ -474,9 +474,14 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		return nil, nil
 	}
 	m.mu.Lock()
-	if existing, ok := m.auths[auth.ID]; ok && existing != nil && !auth.indexAssigned && auth.Index == "" {
-		auth.Index = existing.Index
-		auth.indexAssigned = existing.indexAssigned
+	if existing, ok := m.auths[auth.ID]; ok && existing != nil {
+		if !auth.indexAssigned && auth.Index == "" {
+			auth.Index = existing.Index
+			auth.indexAssigned = existing.indexAssigned
+		}
+		auth.Success = existing.Success
+		auth.Failed = existing.Failed
+		auth.recentRequests = existing.recentRequests
 	}
 	auth.EnsureIndex()
 	m.auths[auth.ID] = auth.Clone()
@@ -1332,6 +1337,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
+		auth.recordRecentRequest(now, result.Success)
+		if result.Success {
+			auth.Success++
+		} else {
+			auth.Failed++
+		}
 
 		if result.Success {
 			if result.Model != "" {

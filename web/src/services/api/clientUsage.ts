@@ -21,11 +21,27 @@ export interface ClientAuthFileUsage {
   auth_id: string;
   auth_index: string;
   provider: string;
+  type?: string;
+  platform?: string;
   label?: string;
   file_name?: string;
   account_type?: string;
   account?: string;
+  status?: string;
+  status_message?: string;
   disabled?: boolean;
+  unavailable?: boolean;
+  last_refresh?: string;
+  next_retry_after?: string;
+  quota?: {
+    exceeded?: boolean;
+    reason?: string;
+    next_recover_at?: string;
+    backoff_level?: number;
+  };
+  success?: number;
+  failed?: number;
+  recent_requests?: Array<{ time?: string; success: number; failed: number }>;
   usage: ClientUsageTotals;
   models?: ClientModelUsage[];
 }
@@ -56,4 +72,3 @@ export const clientUsageApi = {
     return response.data;
   }
 };
-

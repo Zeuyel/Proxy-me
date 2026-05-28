@@ -570,6 +570,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
+		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 		mgmt.GET("/api-key-auth", s.mgmt.GetAPIKeyAuth)
 		mgmt.PUT("/api-key-auth", s.mgmt.PutAPIKeyAuth)
 		mgmt.PATCH("/api-key-auth", s.mgmt.PutAPIKeyAuth)
@@ -676,6 +677,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/auth-files/metadata", s.mgmt.PatchAuthFileMetadata)
 		mgmt.PATCH("/auth-files/rename", s.mgmt.RenameAuthFile)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
+		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
 		mgmt.POST("/auth-files/reset-cooldown", s.mgmt.ResetAuthFileCooldown)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
@@ -1132,14 +1134,26 @@ func (s *Server) GetClientAuthFileUsage(c *gin.Context) {
 		TotalTokens   int    `json:"total_tokens"`
 	}
 	type authFileUsage struct {
-		AuthID    string `json:"auth_id"`
-		AuthIndex string `json:"auth_index"`
-		Provider  string `json:"provider"`
-		Label     string `json:"label,omitempty"`
-		FileName  string `json:"file_name,omitempty"`
-		Account   string `json:"account,omitempty"`
-		Disabled  bool   `json:"disabled,omitempty"`
-		Usage     struct {
+		AuthID         string                     `json:"auth_id"`
+		AuthIndex      string                     `json:"auth_index"`
+		Provider       string                     `json:"provider"`
+		Type           string                     `json:"type"`
+		Platform       string                     `json:"platform"`
+		Label          string                     `json:"label,omitempty"`
+		FileName       string                     `json:"file_name,omitempty"`
+		AccountType    string                     `json:"account_type,omitempty"`
+		Account        string                     `json:"account,omitempty"`
+		Status         auth.Status                `json:"status"`
+		StatusMessage  string                     `json:"status_message,omitempty"`
+		Disabled       bool                       `json:"disabled,omitempty"`
+		Unavailable    bool                       `json:"unavailable,omitempty"`
+		LastRefresh    *time.Time                 `json:"last_refresh,omitempty"`
+		NextRetryAfter *time.Time                 `json:"next_retry_after,omitempty"`
+		Quota          *auth.QuotaState           `json:"quota,omitempty"`
+		Success        int64                      `json:"success"`
+		Failed         int64                      `json:"failed"`
+		RecentRequests []auth.RecentRequestBucket `json:"recent_requests,omitempty"`
+		Usage          struct {
 			TotalRequests int `json:"total_requests"`
 			SuccessCount  int `json:"success_count"`
 			FailureCount  int `json:"failure_count"`
@@ -1222,15 +1236,45 @@ func (s *Server) GetClientAuthFileUsage(c *gin.Context) {
 				}
 			}
 
+			provider := strings.TrimSpace(a.Provider)
+			if provider == "" {
+				provider = "unknown"
+			}
 			af := authFileUsage{
-				AuthID:    a.ID,
-				AuthIndex: a.Index,
-				Provider:  a.Provider,
-				FileName:  a.FileName,
-				Disabled:  a.Disabled,
+				AuthID:         a.ID,
+				AuthIndex:      a.Index,
+				Provider:       provider,
+				Type:           provider,
+				Platform:       provider,
+				FileName:       a.FileName,
+				Status:         a.Status,
+				Disabled:       a.Disabled,
+				Unavailable:    a.Unavailable,
+				Success:        a.Success,
+				Failed:         a.Failed,
+				RecentRequests: a.RecentRequestsSnapshot(time.Now()),
 			}
 			if a.Label != "" {
 				af.Label = a.Label
+			}
+			if accountType, account := a.AccountInfo(); accountType != "" || account != "" {
+				af.AccountType = accountType
+				af.Account = account
+			}
+			if strings.TrimSpace(a.StatusMessage) != "" {
+				af.StatusMessage = a.StatusMessage
+			}
+			if !a.LastRefreshedAt.IsZero() {
+				lastRefresh := a.LastRefreshedAt
+				af.LastRefresh = &lastRefresh
+			}
+			if !a.NextRetryAfter.IsZero() {
+				nextRetryAfter := a.NextRetryAfter
+				af.NextRetryAfter = &nextRetryAfter
+			}
+			if a.Quota.Exceeded || strings.TrimSpace(a.Quota.Reason) != "" || !a.Quota.NextRecoverAt.IsZero() {
+				quota := a.Quota
+				af.Quota = &quota
 			}
 
 			// Look up usage data by auth index

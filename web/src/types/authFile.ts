@@ -24,6 +24,9 @@ export interface AuthFileItem {
   authIndex?: string | number | null;
   runtimeOnly?: boolean | string;
   disabled?: boolean;
+  unavailable?: boolean;
+  status?: string;
+  statusMessage?: string;
   disabledEffective?: boolean;
   disabledReason?: string;
   cooldownActive?: boolean;
@@ -36,6 +39,13 @@ export interface AuthFileItem {
   display_name?: string;
   displayName?: string;
   tags?: string[];
+  success?: unknown;
+  failed?: unknown;
+  recent_requests?: unknown;
+  recentRequests?: unknown;
+  project_id?: string;
+  priority?: unknown;
+  note?: string;
   [key: string]: any;
 }
 

@@ -8,6 +8,13 @@ import type { OAuthModelMappingEntry } from '@/types';
 
 type StatusError = { status?: number };
 type AuthFileStatusResponse = { status: string; disabled: boolean };
+export type AuthFileFieldsPatch = {
+  prefix?: string;
+  proxy_url?: string;
+  headers?: Record<string, string>;
+  priority?: number;
+  note?: string;
+};
 type AuthFileMetadataResponse = {
   status: string;
   name: string;
@@ -125,6 +132,9 @@ export const authFilesApi = {
 
   setStatus: (name: string, disabled: boolean) =>
     apiClient.patch<AuthFileStatusResponse>('/auth-files/status', { name, disabled }),
+
+  patchFields: (name: string, fields: AuthFileFieldsPatch) =>
+    apiClient.patch('/auth-files/fields', { name, ...fields }),
 
   resetCooldown: (name: string, includeQuota: boolean = true) =>
     apiClient.post<AuthFileCooldownResetResponse>('/auth-files/reset-cooldown', {
