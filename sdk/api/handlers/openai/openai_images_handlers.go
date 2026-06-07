@@ -42,9 +42,11 @@ type imageCallResult struct {
 }
 
 type imageStreamResults struct {
-	items     []imageCallResult
-	firstMeta imageCallResult
-	seen      map[string]struct{}
+	items        []imageCallResult
+	firstMeta    imageCallResult
+	seen         map[string]struct{}
+	partials     map[string]imageCallResult
+	partialOrder []string
 }
 
 type imageResponseSummary struct {
@@ -878,6 +880,10 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 			}
 
 			switch gjson.GetBytes(payload, "type").String() {
+			case "response.image_generation_call.partial_image":
+				if item, key, ok := extractImageFromResponsesPartialImage(payload); ok {
+					collected.AddPartial(key, item)
+				}
 			case "response.output_item.done":
 				if item, ok := extractImageFromResponsesOutputItemDone(payload); ok {
 					collected.Add(item)
@@ -927,6 +933,11 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 					} else if done {
 						return out, summary, nil
 					}
+				}
+				if out, summary, ok, err := buildImagesFallbackResponse(collected, responseFormat); err != nil {
+					return nil, imageResponseSummary{}, &interfaces.ErrorMessage{StatusCode: http.StatusInternalServerError, Error: err}
+				} else if ok {
+					return out, summary, nil
 				}
 				return nil, imageResponseSummary{}, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("stream disconnected before completion")}
 			}
@@ -1008,6 +1019,24 @@ func extractImageFromResponsesOutputItemDone(payload []byte) (imageCallResult, b
 	}, true
 }
 
+func extractImageFromResponsesPartialImage(payload []byte) (imageCallResult, string, bool) {
+	if gjson.GetBytes(payload, "type").String() != "response.image_generation_call.partial_image" {
+		return imageCallResult{}, "", false
+	}
+	res := strings.TrimSpace(gjson.GetBytes(payload, "partial_image_b64").String())
+	if res == "" {
+		return imageCallResult{}, "", false
+	}
+	key := strings.TrimSpace(gjson.GetBytes(payload, "item_id").String())
+	if key == "" {
+		key = "partial:" + strconv.FormatInt(gjson.GetBytes(payload, "partial_image_index").Int(), 10)
+	}
+	return imageCallResult{
+		Result:       res,
+		OutputFormat: strings.TrimSpace(gjson.GetBytes(payload, "output_format").String()),
+	}, key, true
+}
+
 func (r *imageStreamResults) Add(item imageCallResult) {
 	if strings.TrimSpace(item.Result) == "" {
 		return
@@ -1028,10 +1057,70 @@ func (r *imageStreamResults) Add(item imageCallResult) {
 	r.items = append(r.items, item)
 }
 
+func (r *imageStreamResults) AddPartial(key string, item imageCallResult) {
+	if strings.TrimSpace(item.Result) == "" {
+		return
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		key = "partial:" + strconv.Itoa(len(r.partialOrder))
+	}
+	if r.partials == nil {
+		r.partials = make(map[string]imageCallResult)
+	}
+	if _, exists := r.partials[key]; !exists {
+		r.partialOrder = append(r.partialOrder, key)
+	}
+	r.partials[key] = item
+}
+
 func (r *imageStreamResults) AddMany(items []imageCallResult) {
 	for _, item := range items {
 		r.Add(item)
 	}
+}
+
+func (r *imageStreamResults) FallbackItems() []imageCallResult {
+	if r == nil {
+		return nil
+	}
+	if len(r.items) > 0 {
+		return r.items
+	}
+	if len(r.partials) == 0 {
+		return nil
+	}
+	out := make([]imageCallResult, 0, len(r.partials))
+	for _, key := range r.partialOrder {
+		if item, ok := r.partials[key]; ok && strings.TrimSpace(item.Result) != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func buildImagesFallbackResponse(collected *imageStreamResults, responseFormat string) ([]byte, imageResponseSummary, bool, error) {
+	items := collected.FallbackItems()
+	if len(items) == 0 {
+		return nil, imageResponseSummary{}, false, nil
+	}
+	firstMeta := imageCallResult{}
+	if collected != nil {
+		firstMeta = collected.firstMeta
+	}
+	if firstMeta.Result == "" {
+		firstMeta = items[0]
+	}
+	createdAt := time.Now().Unix()
+	out, err := buildImagesAPIResponse(items, createdAt, nil, firstMeta, responseFormat)
+	if err != nil {
+		return nil, imageResponseSummary{}, false, err
+	}
+	return out, imageResponseSummary{
+		ImageCount:   len(items),
+		CreatedAt:    createdAt,
+		OutputFormat: firstNonEmptyOutputFormat(items),
+	}, true, nil
 }
 
 func firstNonEmptyOutputFormat(results []imageCallResult) string {

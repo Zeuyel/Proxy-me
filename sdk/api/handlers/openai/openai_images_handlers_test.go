@@ -214,3 +214,54 @@ func TestCollectImagesFromResponsesStreamDedupesOutputItemDoneAndCompletedImage(
 		t.Fatalf("unexpected summary: %+v", summary)
 	}
 }
+
+func TestCollectImagesFromResponsesStreamReturnsOutputItemDoneOnDisconnect(t *testing.T) {
+	ctx := context.Background()
+	data := make(chan []byte, 1)
+	errs := make(chan *interfaces.ErrorMessage)
+
+	data <- []byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"ig_123\",\"type\":\"image_generation_call\",\"output_format\":\"png\",\"result\":\"aGVsbG8=\"}}\n\n")
+	close(data)
+	close(errs)
+
+	out, summary, errMsg := collectImagesFromResponsesStream(ctx, data, errs, "b64_json")
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %+v", errMsg)
+	}
+
+	if got := gjson.GetBytes(out, "data.0.b64_json").String(); got != "aGVsbG8=" {
+		t.Fatalf("data.0.b64_json = %q, want aGVsbG8=; out=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "error").Exists(); got {
+		t.Fatalf("unexpected error object in fallback response: %s", out)
+	}
+	if summary.ImageCount != 1 || summary.OutputFormat != "png" {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+}
+
+func TestCollectImagesFromResponsesStreamReturnsPartialImageOnDisconnect(t *testing.T) {
+	ctx := context.Background()
+	data := make(chan []byte, 2)
+	errs := make(chan *interfaces.ErrorMessage)
+
+	data <- []byte("data: {\"type\":\"response.image_generation_call.partial_image\",\"item_id\":\"ig_123\",\"output_format\":\"png\",\"partial_image_b64\":\"cGFydGlhbDE=\",\"partial_image_index\":0}\n\n")
+	data <- []byte("data: {\"type\":\"response.image_generation_call.partial_image\",\"item_id\":\"ig_123\",\"output_format\":\"png\",\"partial_image_b64\":\"cGFydGlhbDI=\",\"partial_image_index\":1}\n\n")
+	close(data)
+	close(errs)
+
+	out, summary, errMsg := collectImagesFromResponsesStream(ctx, data, errs, "b64_json")
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %+v", errMsg)
+	}
+
+	if got := gjson.GetBytes(out, "data.0.b64_json").String(); got != "cGFydGlhbDI=" {
+		t.Fatalf("data.0.b64_json = %q, want latest partial; out=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "output_format").String(); got != "png" {
+		t.Fatalf("output_format = %q, want png; out=%s", got, out)
+	}
+	if summary.ImageCount != 1 || summary.OutputFormat != "png" {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+}
