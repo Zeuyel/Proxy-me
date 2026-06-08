@@ -93,6 +93,9 @@ type Config struct {
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
+	// Codex configures provider-wide Codex request behavior.
+	Codex CodexConfig `yaml:"codex" json:"codex"`
+
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
@@ -245,6 +248,13 @@ type SessionRoutingConfig struct {
 	// "exponential" (default): 1 - exp(-LoadWeight * loadCount / avgLoad) - ensures even distribution
 	// "linear": loadCount / (loadCount + 1) - legacy behavior
 	LoadBalanceMode string `yaml:"load-balance-mode,omitempty" json:"load-balance-mode,omitempty"`
+}
+
+// CodexConfig configures provider-wide Codex request behavior.
+type CodexConfig struct {
+	// IdentityConfuse remaps Codex identity metadata per selected auth when
+	// sticky routing is used, reducing cross-account client telemetry reuse.
+	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

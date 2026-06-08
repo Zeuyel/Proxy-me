@@ -138,6 +138,13 @@ routing:
     # - linear: Legacy behavior (less aggressive balancing)
     load-balance-mode: "exponential"
 
+# Codex provider behavior.
+codex:
+  # When true, and routing.strategy is fill-first or session, remap Codex
+  # prompt_cache_key, installation identity, turn/window metadata, and related
+  # request headers per selected auth.
+  identity-confuse: false
+
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 

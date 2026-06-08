@@ -50,8 +50,8 @@ func TestCodexPrepareRequestUsesAccessTokenMetadata(t *testing.T) {
 	if got := req.Header.Get("User-Agent"); got != defaultCodexUserAgent {
 		t.Fatalf("User-Agent = %q, want %q", got, defaultCodexUserAgent)
 	}
-	if got := req.Header.Get("Chatgpt-Account-Id"); got != accountID {
-		t.Fatalf("Chatgpt-Account-Id = %q, want %q", got, accountID)
+	if got := req.Header.Get("Chatgpt-Account-Id"); got != "" {
+		t.Fatalf("Chatgpt-Account-Id = %q, want empty by default", got)
 	}
 	if got := req.Header.Get("Originator"); got != defaultCodexOriginator {
 		t.Fatalf("Originator = %q, want %q", got, defaultCodexOriginator)
@@ -174,7 +174,7 @@ func TestCodexCacheHelperUsesOriginalPreviousResponseIDForConversationHeaders(t 
 	}
 	body := []byte(`{"model":"gpt-5-codex","input":"hi","previous_response_id":"resp_12345678901234567890"}`)
 
-	httpReq, err := exec.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), "https://example.com/responses", req, opts, body)
+	httpReq, bodyBytes, _, err := exec.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), "https://example.com/responses", nil, req, opts, opts.OriginalRequest, body)
 	if err != nil {
 		t.Fatalf("cacheHelper error: %v", err)
 	}
@@ -183,13 +183,8 @@ func TestCodexCacheHelperUsesOriginalPreviousResponseIDForConversationHeaders(t 
 	if got := httpReq.Header.Get("Session_id"); got != wantConversationID {
 		t.Fatalf("Session_id = %q, want %q", got, wantConversationID)
 	}
-	if got := httpReq.Header.Get("Conversation_id"); got != wantConversationID {
-		t.Fatalf("Conversation_id = %q, want %q", got, wantConversationID)
-	}
-
-	bodyBytes, err := io.ReadAll(httpReq.Body)
-	if err != nil {
-		t.Fatalf("read request body: %v", err)
+	if got := httpReq.Header.Get("Conversation_id"); got != "" {
+		t.Fatalf("Conversation_id = %q, want empty", got)
 	}
 	if got := gjson.GetBytes(bodyBytes, "previous_response_id").String(); got != "resp_12345678901234567890" {
 		t.Fatalf("previous_response_id = %q, want preserved value", got)
@@ -243,6 +238,90 @@ func TestCodexExecutePreservesPreviousResponseIDForUpstreamRequest(t *testing.T)
 	}
 	if gotSessionID != wantConversationID {
 		t.Fatalf("upstream Session_id = %q, want %q", gotSessionID, wantConversationID)
+	}
+}
+
+func TestCodexIdentityConfuseRemapsRequestIdentity(t *testing.T) {
+	exec := NewCodexExecutor(&config.Config{
+		Codex: config.CodexConfig{IdentityConfuse: true},
+		Routing: config.RoutingConfig{
+			Strategy: "session",
+		},
+	})
+	auth := &cliproxyauth.Auth{
+		ID:       "auth-codex-plus",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"access_token": fakeCodexJWT(t, "acct-123456"),
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":"hi","prompt_cache_key":"client-cache-1234567890"}`),
+	}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}
+	body := []byte(`{"model":"gpt-5-codex","input":"hi","prompt_cache_key":"client-cache-1234567890","client_metadata":{"x-codex-installation-id":"install-123","x-codex-turn-metadata":"{\"prompt_cache_key\":\"client-cache-1234567890\",\"turn_id\":\"turn-123\",\"window_id\":\"client-cache-1234567890:0\"}","x-codex-window-id":"client-cache-1234567890:0"}}`)
+
+	httpReq, upstreamBody, state, err := exec.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), "https://example.com/responses", auth, req, opts, req.Payload, body)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+	applyCodexHeaders(httpReq, auth, "token", true)
+	applyCodexIdentityConfuseHeaders(httpReq.Header, &state)
+
+	confusedCache := gjson.GetBytes(upstreamBody, "prompt_cache_key").String()
+	if confusedCache == "" || confusedCache == "client-cache-1234567890" {
+		t.Fatalf("prompt_cache_key was not confused: %q; body=%s", confusedCache, upstreamBody)
+	}
+	if got := httpReq.Header.Get("Session_id"); got != confusedCache {
+		t.Fatalf("Session_id = %q, want confused prompt cache %q", got, confusedCache)
+	}
+	if got := httpReq.Header.Get("X-Client-Request-Id"); got != confusedCache {
+		t.Fatalf("X-Client-Request-Id = %q, want confused prompt cache %q", got, confusedCache)
+	}
+	if got := httpReq.Header.Get("X-Codex-Window-Id"); got != confusedCache+":0" {
+		t.Fatalf("X-Codex-Window-Id = %q, want %q", got, confusedCache+":0")
+	}
+	if got := httpReq.Header.Get("Conversation_id"); got != "" {
+		t.Fatalf("Conversation_id = %q, want empty", got)
+	}
+	if got := httpReq.Header.Get("Chatgpt-Account-Id"); got != "" {
+		t.Fatalf("Chatgpt-Account-Id = %q, want empty", got)
+	}
+	turnMetadata := gjson.GetBytes(upstreamBody, "client_metadata.x-codex-turn-metadata").String()
+	if got := gjson.Get(turnMetadata, "prompt_cache_key").String(); got != confusedCache {
+		t.Fatalf("turn metadata prompt_cache_key = %q, want %q; metadata=%s", got, confusedCache, turnMetadata)
+	}
+	if got := gjson.Get(turnMetadata, "turn_id").String(); got == "" || got == "turn-123" {
+		t.Fatalf("turn metadata turn_id was not confused: %q; metadata=%s", got, turnMetadata)
+	}
+	if got := gjson.Get(turnMetadata, "window_id").String(); got != confusedCache+":0" {
+		t.Fatalf("turn metadata window_id = %q, want %q; metadata=%s", got, confusedCache+":0", turnMetadata)
+	}
+	if got := gjson.GetBytes(upstreamBody, "client_metadata.x-codex-installation-id").String(); got == "" || got == "install-123" {
+		t.Fatalf("installation id was not confused: %q; body=%s", got, upstreamBody)
+	}
+}
+
+func TestCodexIdentityExposeResponseRestoresClientIdentity(t *testing.T) {
+	state := codexIdentityConfuseState{
+		enabled:                true,
+		authID:                 "auth-codex-plus",
+		originalPromptCacheKey: "client-cache-1234567890",
+		promptCacheKey:         codexIdentityConfuseUUID("auth-codex-plus", "prompt-cache", "client-cache-1234567890"),
+		turnIDs: []codexIdentityReplacement{{
+			original: "turn-123",
+			confused: codexIdentityConfuseUUID("auth-codex-plus", "turn", "turn-123"),
+		}},
+	}
+
+	upstreamPayload := []byte(`{"prompt_cache_key":"` + state.promptCacheKey + `","turn_id":"` + state.turnIDs[0].confused + `"}`)
+	got := applyCodexIdentityExposeResponsePayload(upstreamPayload, state)
+	if key := gjson.GetBytes(got, "prompt_cache_key").String(); key != "client-cache-1234567890" {
+		t.Fatalf("prompt_cache_key = %q, want original; payload=%s", key, got)
+	}
+	if turnID := gjson.GetBytes(got, "turn_id").String(); turnID != "turn-123" {
+		t.Fatalf("turn_id = %q, want original; payload=%s", turnID, got)
 	}
 }
 
