@@ -30,6 +30,9 @@ const (
 	codexDeviceTokenExchangeRedirectURI   = "https://auth.openai.com/deviceauth/callback"
 	codexDeviceTimeout                    = 15 * time.Minute
 	codexDeviceDefaultPollIntervalSeconds = 5
+	codexDeviceOriginator                 = "codex_cli_rs"
+	codexDeviceUserAgent                  = "codex_cli_rs/0.124.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+	codexDeviceMaxErrorBodyBytes          = 512
 )
 
 type codexDeviceUserCodeRequest struct {
@@ -54,6 +57,14 @@ type codexDeviceTokenResponse struct {
 	CodeChallenge     string `json:"code_challenge"`
 }
 
+// CodexDeviceFlow contains the data needed to complete a Codex device-code login.
+type CodexDeviceFlow struct {
+	VerificationURL string        `json:"verification_url"`
+	UserCode        string        `json:"user_code"`
+	DeviceAuthID    string        `json:"-"`
+	PollInterval    time.Duration `json:"-"`
+}
+
 func shouldUseCodexDeviceFlow(opts *LoginOptions) bool {
 	if opts == nil || opts.Metadata == nil {
 		return false
@@ -61,13 +72,50 @@ func shouldUseCodexDeviceFlow(opts *LoginOptions) bool {
 	return strings.EqualFold(strings.TrimSpace(opts.Metadata[codexLoginModeMetadataKey]), codexLoginModeDevice)
 }
 
+var newCodexDeviceHTTPClient = func(cfg *config.Config) *http.Client {
+	if cfg == nil {
+		return util.NewUTLSHTTPClient(nil)
+	}
+	return util.NewUTLSHTTPClient(&cfg.SDKConfig)
+}
+
+var codexDeviceCloudflareChallengePollInterval = 30 * time.Second
+
 func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	httpClient := util.SetProxy(&cfg.SDKConfig, &http.Client{})
+	flow, err := a.StartDeviceFlow(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
 
+	fmt.Println("Starting Codex device authentication...")
+	fmt.Printf("Codex device URL: %s\n", flow.VerificationURL)
+	fmt.Printf("Codex device code: %s\n", flow.UserCode)
+
+	if !opts.NoBrowser {
+		if !browser.IsAvailable() {
+			log.Warn("No browser available; please open the device URL manually")
+		} else if errOpen := browser.OpenURL(flow.VerificationURL); errOpen != nil {
+			log.Warnf("Failed to open browser automatically: %v", errOpen)
+		}
+	}
+
+	return a.CompleteDeviceFlow(ctx, cfg, flow)
+}
+
+// StartDeviceFlow requests a Codex one-time user code without blocking for completion.
+func (a *CodexAuthenticator) StartDeviceFlow(ctx context.Context, cfg *config.Config) (*CodexDeviceFlow, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("cliproxy auth: configuration is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	httpClient := newCodexDeviceHTTPClient(cfg)
 	userCodeResp, err := requestCodexDeviceUserCode(ctx, httpClient)
 	if err != nil {
 		return nil, err
@@ -82,18 +130,36 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		return nil, fmt.Errorf("codex device flow did not return required fields")
 	}
 
-	pollInterval := parseCodexDevicePollInterval(userCodeResp.Interval)
+	return &CodexDeviceFlow{
+		VerificationURL: codexDeviceVerificationURL,
+		UserCode:        deviceCode,
+		DeviceAuthID:    deviceAuthID,
+		PollInterval:    parseCodexDevicePollInterval(userCodeResp.Interval),
+	}, nil
+}
 
-	fmt.Println("Starting Codex device authentication...")
-	fmt.Printf("Codex device URL: %s\n", codexDeviceVerificationURL)
-	fmt.Printf("Codex device code: %s\n", deviceCode)
+// CompleteDeviceFlow polls until the user authorizes the one-time code and returns an auth record.
+func (a *CodexAuthenticator) CompleteDeviceFlow(ctx context.Context, cfg *config.Config, flow *CodexDeviceFlow) (*coreauth.Auth, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("cliproxy auth: configuration is required")
+	}
+	if flow == nil {
+		return nil, fmt.Errorf("codex device flow is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	if !opts.NoBrowser {
-		if !browser.IsAvailable() {
-			log.Warn("No browser available; please open the device URL manually")
-		} else if errOpen := browser.OpenURL(codexDeviceVerificationURL); errOpen != nil {
-			log.Warnf("Failed to open browser automatically: %v", errOpen)
-		}
+	deviceAuthID := strings.TrimSpace(flow.DeviceAuthID)
+	deviceCode := strings.TrimSpace(flow.UserCode)
+	if deviceAuthID == "" || deviceCode == "" {
+		return nil, fmt.Errorf("codex device flow did not return required fields")
+	}
+
+	httpClient := newCodexDeviceHTTPClient(cfg)
+	pollInterval := flow.PollInterval
+	if pollInterval <= 0 {
+		pollInterval = time.Duration(codexDeviceDefaultPollIntervalSeconds) * time.Second
 	}
 
 	tokenResp, err := pollCodexDeviceToken(ctx, httpClient, deviceAuthID, deviceCode, pollInterval)
@@ -137,6 +203,7 @@ func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*code
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	setCodexDeviceRequestHeaders(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -150,7 +217,7 @@ func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*code
 	}
 
 	if !codexDeviceIsSuccessStatus(resp.StatusCode) {
-		trimmed := strings.TrimSpace(string(respBody))
+		trimmed := codexDeviceResponseSnippet(respBody)
 		if resp.StatusCode == http.StatusNotFound {
 			return nil, fmt.Errorf("codex device endpoint is unavailable (status %d)", resp.StatusCode)
 		}
@@ -190,6 +257,7 @@ func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
+		setCodexDeviceRequestHeaders(req)
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -209,21 +277,70 @@ func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID
 				return nil, fmt.Errorf("failed to decode codex device token response: %w", err)
 			}
 			return &parsed, nil
-		case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound:
+		case codexDeviceShouldKeepPolling(resp.StatusCode, respBody):
+			sleepFor := codexDevicePollSleepInterval(interval, resp.StatusCode, respBody, deadline)
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(interval):
+			case <-time.After(sleepFor):
 				continue
 			}
 		default:
-			trimmed := strings.TrimSpace(string(respBody))
+			trimmed := codexDeviceResponseSnippet(respBody)
 			if trimmed == "" {
 				trimmed = "empty response body"
 			}
 			return nil, fmt.Errorf("codex device token polling failed with status %d: %s", resp.StatusCode, trimmed)
 		}
 	}
+}
+
+func setCodexDeviceRequestHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", codexDeviceUserAgent)
+	req.Header.Set("Originator", codexDeviceOriginator)
+}
+
+func codexDeviceShouldKeepPolling(statusCode int, body []byte) bool {
+	if statusCode == http.StatusForbidden || statusCode == http.StatusNotFound {
+		return true
+	}
+	return statusCode == http.StatusTooManyRequests && codexDeviceIsCloudflareChallenge(body)
+}
+
+func codexDeviceIsCloudflareChallenge(body []byte) bool {
+	text := strings.ToLower(string(body))
+	return strings.Contains(text, "challenges.cloudflare.com") ||
+		strings.Contains(text, "__cf_chl") ||
+		strings.Contains(text, "cf_chl") ||
+		(strings.Contains(text, "cloudflare") && strings.Contains(text, "just a moment"))
+}
+
+func codexDevicePollSleepInterval(interval time.Duration, statusCode int, body []byte, deadline time.Time) time.Duration {
+	if interval <= 0 {
+		interval = time.Duration(codexDeviceDefaultPollIntervalSeconds) * time.Second
+	}
+	if statusCode == http.StatusTooManyRequests &&
+		codexDeviceIsCloudflareChallenge(body) &&
+		codexDeviceCloudflareChallengePollInterval > 0 &&
+		interval < codexDeviceCloudflareChallengePollInterval {
+		interval = codexDeviceCloudflareChallengePollInterval
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0
+	}
+	if interval > remaining {
+		return remaining
+	}
+	return interval
+}
+
+func codexDeviceResponseSnippet(body []byte) string {
+	trimmed := strings.TrimSpace(string(body))
+	if len(trimmed) <= codexDeviceMaxErrorBodyBytes {
+		return trimmed
+	}
+	return trimmed[:codexDeviceMaxErrorBodyBytes] + "...(truncated)"
 }
 
 func parseCodexDevicePollInterval(raw json.RawMessage) time.Duration {

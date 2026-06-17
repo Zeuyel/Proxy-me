@@ -119,3 +119,21 @@
   --shadow: var(--brutal-shadow);
   --shadow-lg: var(--brutal-shadow-hover);
 }
+// 补充缺失的语义令牌别名（修复未定义变量导致的样式失效）
+:root {
+  --danger-color: var(--error-color);
+  --bg-hover: var(--bg-tertiary);
+  --card-bg: var(--bg-primary);
+  --input-bg: var(--bg-primary);
+  --border-primary: var(--border-color);
+  --border-secondary: var(--bg-tertiary);
+  --primary-soft: rgba(59, 130, 246, 0.12);
+  --text-muted: var(--text-tertiary);
+  --text-quaternary: var(--text-tertiary);
+}
+
+[data-theme='dark'] {
+  --border-secondary: var(--bg-tertiary);
+  --primary-soft: rgba(96, 165, 250, 0.18);
+  --text-quaternary: var(--text-tertiary);
+}

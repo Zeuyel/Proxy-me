@@ -286,13 +286,14 @@
   .nav-item {
     padding: 10px 12px;
     border-radius: $radius-md;
+    border: 1px solid transparent;
     color: var(--text-primary);
     font-weight: 600;
     display: flex;
     align-items: center;
     gap: $spacing-sm;
     cursor: pointer;
-    transition: background $transition-fast, color $transition-fast;
+    transition: background $transition-fast, color $transition-fast, border-color $transition-fast;
 
     .nav-icon {
       width: 20px;
@@ -320,10 +321,17 @@
       background: var(--bg-secondary);
     }
 
+    &:focus-visible {
+      outline: none;
+      border-color: var(--primary-color);
+      box-shadow: var(--brutal-shadow-sm);
+    }
+
     &.active {
-      background: rgba(59, 130, 246, 0.12);
+      background: var(--primary-soft);
       color: var(--primary-color);
-      border: 1px solid rgba(59, 130, 246, 0.3);
+      border-color: var(--primary-color);
+      font-weight: 700;
     }
   }
 

@@ -22,6 +22,11 @@ interface ProviderState {
   status?: 'idle' | 'waiting' | 'success' | 'error';
   error?: string;
   polling?: boolean;
+  deviceActive?: boolean;
+  deviceLoading?: boolean;
+  verificationUrl?: string;
+  userCode?: string;
+  expiresIn?: number;
   projectId?: string;
   projectIdError?: string;
   callbackUrl?: string;
@@ -154,6 +159,45 @@ export function OAuthPage() {
     } catch (err: any) {
       updateProviderState(provider, { status: 'error', error: err?.message, polling: false });
       showNotification(`${t(getAuthKey(provider, 'oauth_start_error'))} ${err?.message || ''}`, 'error');
+    }
+  };
+
+  const startCodexDeviceAuth = async () => {
+    const provider: OAuthProvider = 'codex';
+    updateProviderState(provider, {
+      deviceLoading: true,
+      status: 'waiting',
+      error: undefined
+    });
+    try {
+      const res = await oauthApi.startCodexDeviceAuth();
+      if (res.status !== 'ok') {
+        throw new Error(res.error || '');
+      }
+      const verificationUrl = res.verificationUrl || res.verification_url || res.url;
+      const userCode = res.userCode || res.user_code;
+      const expiresIn = res.expiresIn ?? res.expires_in;
+      updateProviderState(provider, {
+        deviceActive: true,
+        deviceLoading: false,
+        verificationUrl,
+        userCode,
+        expiresIn,
+        state: res.state,
+        status: 'waiting',
+        polling: true
+      });
+      if (res.state) {
+        startPolling(provider, res.state);
+      }
+    } catch (err: any) {
+      updateProviderState(provider, {
+        deviceLoading: false,
+        status: 'error',
+        error: err?.message,
+        polling: false
+      });
+      showNotification(`${t('auth_login.codex_device_start_error')} ${err?.message || ''}`, 'error');
     }
   };
 
@@ -354,6 +398,76 @@ export function OAuthPage() {
                 }
               >
                 <div className="hint">{t(provider.hintKey)}</div>
+                {provider.id === 'codex' && (
+                  <div className={styles.deviceSection}>
+                    <div className={styles.deviceHint}>{t('auth_login.codex_device_hint')}</div>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void startCodexDeviceAuth()}
+                      loading={state.deviceLoading}
+                    >
+                      {t('auth_login.codex_device_button')}
+                    </Button>
+                    {state.deviceActive && (
+                      <div className={`connection-box ${styles.authUrlBox}`}>
+                        {state.verificationUrl && (
+                          <>
+                            <div className={styles.authUrlLabel}>
+                              {t('auth_login.codex_device_verification_label')}
+                            </div>
+                            <div className={styles.authUrlValue}>{state.verificationUrl}</div>
+                          </>
+                        )}
+                        {state.userCode && (
+                          <div className={styles.deviceCodeRow}>
+                            <span className={styles.authUrlLabel}>
+                              {t('auth_login.codex_device_user_code_label')}
+                            </span>
+                            <span className={styles.deviceCode}>{state.userCode}</span>
+                          </div>
+                        )}
+                        {typeof state.expiresIn === 'number' && (
+                          <div className={styles.deviceExpires}>
+                            {t('auth_login.codex_device_expires_label')}{' '}
+                            {t('auth_login.codex_device_expires_value', { seconds: state.expiresIn })}
+                          </div>
+                        )}
+                        <div className={styles.authUrlActions}>
+                          {state.userCode && (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => void copyLink(state.userCode)}
+                            >
+                              {t('auth_login.codex_device_copy_code')}
+                            </Button>
+                          )}
+                          {state.verificationUrl && (
+                            <>
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => void copyLink(state.verificationUrl)}
+                              >
+                                {t('auth_login.codex_device_copy_link')}
+                              </Button>
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() =>
+                                  window.open(state.verificationUrl, '_blank', 'noopener,noreferrer')
+                                }
+                              >
+                                {t('auth_login.codex_device_open_link')}
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {provider.id === 'gemini-cli' && (
                   <div className={styles.geminiProjectField}>
                     <Input

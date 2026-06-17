@@ -2829,6 +2829,64 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
+func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
+	ctx := context.Background()
+
+	fmt.Println("Initializing Codex device authentication...")
+
+	state, err := misc.GenerateRandomState()
+	if err != nil {
+		log.Errorf("Failed to generate state parameter: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
+		return
+	}
+
+	authenticator := sdkAuth.NewCodexAuthenticator()
+	deviceFlow, err := authenticator.StartDeviceFlow(ctx, h.cfg)
+	if err != nil {
+		log.Errorf("Failed to start Codex device flow: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start codex device authentication"})
+		return
+	}
+
+	RegisterOAuthSession(state, "codex")
+
+	go func() {
+		fmt.Println("Waiting for Codex device authentication...")
+		record, errComplete := authenticator.CompleteDeviceFlow(ctx, h.cfg, deviceFlow)
+		if errComplete != nil {
+			log.Errorf("Codex device authentication failed: %v", errComplete)
+			SetOAuthSessionError(state, "Codex device authentication failed")
+			return
+		}
+
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			log.Errorf("Failed to save Codex device authentication tokens: %v", errSave)
+			return
+		}
+
+		fmt.Printf("Codex device authentication successful! Token saved to %s\n", savedPath)
+		CompleteOAuthSession(state)
+		CompleteOAuthSessionsByProvider("codex")
+	}()
+
+	c.JSON(200, gin.H{
+		"status":           "ok",
+		"mode":             "device",
+		"url":              deviceFlow.VerificationURL,
+		"state":            state,
+		"verification_url": deviceFlow.VerificationURL,
+		"verificationUrl":  deviceFlow.VerificationURL,
+		"user_code":        deviceFlow.UserCode,
+		"userCode":         deviceFlow.UserCode,
+		"expires_in":       int((15 * time.Minute).Seconds()),
+		"expiresIn":        int((15 * time.Minute).Seconds()),
+		"interval":         int(deviceFlow.PollInterval.Seconds()),
+	})
+}
+
 func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	ctx := context.Background()
 

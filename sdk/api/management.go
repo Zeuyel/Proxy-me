@@ -16,6 +16,7 @@ type ManagementTokenRequester interface {
 	RequestAnthropicToken(*gin.Context)
 	RequestGeminiCLIToken(*gin.Context)
 	RequestCodexToken(*gin.Context)
+	RequestCodexDeviceToken(*gin.Context)
 	RequestAntigravityToken(*gin.Context)
 	RequestQwenToken(*gin.Context)
 	RequestIFlowToken(*gin.Context)
@@ -45,6 +46,10 @@ func (m *managementTokenRequester) RequestGeminiCLIToken(c *gin.Context) {
 
 func (m *managementTokenRequester) RequestCodexToken(c *gin.Context) {
 	m.handler.RequestCodexToken(c)
+}
+
+func (m *managementTokenRequester) RequestCodexDeviceToken(c *gin.Context) {
+	m.handler.RequestCodexDeviceToken(c)
 }
 
 func (m *managementTokenRequester) RequestAntigravityToken(c *gin.Context) {

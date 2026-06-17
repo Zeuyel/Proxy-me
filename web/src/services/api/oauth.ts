@@ -20,6 +20,21 @@ export interface OAuthCallbackResponse {
   status: 'ok';
 }
 
+export interface CodexDeviceAuthResponse {
+  status: 'ok' | 'error';
+  mode?: string;
+  error?: string;
+  url?: string;
+  verification_url?: string;
+  verificationUrl?: string;
+  user_code?: string;
+  userCode?: string;
+  state?: string;
+  expires_in?: number;
+  expiresIn?: number;
+  interval?: number;
+}
+
 export interface IFlowCookieAuthResponse {
   status: 'ok' | 'error';
   error?: string;
@@ -63,5 +78,9 @@ export const oauthApi = {
 
   /** iFlow cookie 认证 */
   iflowCookieAuth: (cookie: string) =>
-    apiClient.post<IFlowCookieAuthResponse>('/iflow-auth-url', { cookie })
+    apiClient.post<IFlowCookieAuthResponse>('/iflow-auth-url', { cookie }),
+
+  /** Codex 设备码登录 */
+  startCodexDeviceAuth: () =>
+    apiClient.get<CodexDeviceAuthResponse>('/codex-device-auth-url')
 };

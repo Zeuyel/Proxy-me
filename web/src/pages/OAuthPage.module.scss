@@ -143,3 +143,38 @@
 .fileNamePlaceholder {
   color: var(--text-secondary);
 }
+
+.deviceSection {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+  margin-top: $spacing-md;
+  padding-top: $spacing-md;
+  border-top: 1px dashed var(--border-color);
+}
+
+.deviceHint {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.deviceCodeRow {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  flex-wrap: wrap;
+}
+
+.deviceCode {
+  font-family: $font-mono;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  color: var(--primary-color);
+  word-break: break-all;
+}
+
+.deviceExpires {
+  color: var(--text-secondary);
+  font-size: 13px;
+}

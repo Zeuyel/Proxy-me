@@ -113,7 +113,7 @@
 .input,
 textarea {
   width: 100%;
-  border: 2px solid var(--brutal-border);
+  border: 2px solid var(--border-color);
   border-radius: $radius-md;
   padding: 10px 12px;
   background-color: var(--bg-primary);
@@ -122,7 +122,7 @@ textarea {
 
   &:focus {
     outline: none;
-    border-color: var(--brutal-border);
+    border-color: var(--border-color);
     box-shadow: var(--brutal-shadow-sm);
   }
 }
@@ -206,7 +206,7 @@ textarea {
   padding: 4px 10px;
   border-radius: $radius-full;
   font-size: 13px;
-  border: 2px solid var(--brutal-border);
+  border: 2px solid var(--border-color);
   margin-bottom: $spacing-md;
   box-shadow: var(--brutal-shadow-sm);
 
@@ -277,7 +277,7 @@ textarea {
   padding: $spacing-md;
   border-radius: $radius-md;
   box-shadow: var(--brutal-shadow);
-  border: 2px solid var(--brutal-border);
+  border: 2px solid var(--border-color);
   background: var(--bg-primary);
   color: var(--text-primary);
   display: flex;
@@ -461,7 +461,7 @@ textarea {
 .modal {
   background: var(--bg-primary);
   border-radius: $radius-lg;
-  border: 2px solid var(--brutal-border);
+  border: 2px solid var(--border-color);
   box-shadow: var(--brutal-shadow);
   max-height: 90vh;
   overflow: hidden;
@@ -512,7 +512,7 @@ textarea {
   height: 32px;
   padding: 0;
   background: var(--bg-secondary);
-  border: 2px solid var(--brutal-border);
+  border: 2px solid var(--border-color);
   color: var(--text-secondary);
   cursor: pointer;
   border-radius: $radius-full;
@@ -553,7 +553,7 @@ textarea {
   display: flex;
   align-items: center;
   padding: $spacing-md $spacing-lg;
-  border-bottom: 2px solid var(--brutal-border);
+  border-bottom: 2px solid var(--border-color);
 
   .modal-title {
     font-weight: 700;
@@ -570,7 +570,7 @@ textarea {
 
 .modal-footer {
   padding: $spacing-md $spacing-lg;
-  border-top: 2px solid var(--brutal-border);
+  border-top: 2px solid var(--border-color);
   display: flex;
   justify-content: flex-end;
   gap: $spacing-sm;
@@ -589,7 +589,7 @@ textarea {
 }
 
 .empty-state {
-  border: 2px dashed var(--brutal-border);
+  border: 2px dashed var(--border-color);
   border-radius: $radius-lg;
   padding: $spacing-lg;
   background: var(--bg-secondary);
@@ -659,7 +659,7 @@ textarea {
 }
 
 .item-row {
-  border: 2px solid var(--brutal-border);
+  border: 2px solid var(--border-color);
   border-radius: $radius-md;
   padding: $spacing-md;
   background: var(--bg-primary);
