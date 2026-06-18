@@ -22,6 +22,7 @@ import (
 )
 
 const defaultAPICallTimeout = 60 * time.Second
+const codexQuotaProbeLogBodyLimit = 512
 
 const (
 	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
@@ -210,6 +211,7 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	h.logCodexQuotaProbeResult(auth, authIndex, parsedURL, resp.StatusCode, respBody)
 	h.syncQuotaProbeFromAPICall(c.Request.Context(), auth, parsedURL, resp.StatusCode, respBody)
 
 	c.JSON(http.StatusOK, apiCallResponse{
@@ -217,6 +219,67 @@ func (h *Handler) APICall(c *gin.Context) {
 		Header:     resp.Header,
 		Body:       string(respBody),
 	})
+}
+
+func (h *Handler) logCodexQuotaProbeResult(auth *coreauth.Auth, authIndex string, requestURL *url.URL, statusCode int, respBody []byte) {
+	if auth == nil || requestURL == nil {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return
+	}
+	if !isCodexUsageProbeRequest(requestURL) {
+		return
+	}
+
+	fields := log.Fields{
+		"auth_id":    auth.ID,
+		"auth_index": strings.TrimSpace(authIndex),
+		"status":     statusCode,
+		"url":        requestURL.Scheme + "://" + requestURL.Host + strings.TrimRight(strings.TrimSpace(requestURL.Path), "/"),
+	}
+
+	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+		log.WithFields(fields).
+			WithField("body", codexQuotaProbeBodySnippet(respBody)).
+			Warn("codex quota probe upstream returned non-2xx")
+		return
+	}
+
+	if !json.Valid(respBody) {
+		log.WithFields(fields).
+			WithField("body", codexQuotaProbeBodySnippet(respBody)).
+			Warn("codex quota probe upstream returned invalid json")
+		return
+	}
+
+	now := time.Now()
+	if recoverAt, reason, limited := executor.DetectCodexQuotaRecoverAt(respBody, now); limited {
+		log.WithFields(fields).
+			WithField("quota_state", "limited").
+			WithField("reason", reason).
+			WithField("recover_at", recoverAt.Format(time.RFC3339)).
+			Info("codex quota probe completed")
+		return
+	}
+	if executor.DetectCodexQuotaHasAvailableWindow(respBody) {
+		log.WithFields(fields).
+			WithField("quota_state", "available").
+			Info("codex quota probe completed")
+		return
+	}
+
+	log.WithFields(fields).
+		WithField("body", codexQuotaProbeBodySnippet(respBody)).
+		Warn("codex quota probe upstream payload was not recognized")
+}
+
+func codexQuotaProbeBodySnippet(body []byte) string {
+	trimmed := strings.TrimSpace(string(body))
+	if len(trimmed) <= codexQuotaProbeLogBodyLimit {
+		return trimmed
+	}
+	return trimmed[:codexQuotaProbeLogBodyLimit] + "...(truncated)"
 }
 
 func (h *Handler) syncQuotaProbeFromAPICall(ctx context.Context, auth *coreauth.Auth, requestURL *url.URL, statusCode int, respBody []byte) {
