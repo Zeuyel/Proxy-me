@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -241,14 +242,14 @@ func (h *Handler) logCodexQuotaProbeResult(auth *coreauth.Auth, authIndex string
 
 	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
 		log.WithFields(fields).
-			WithField("body", codexQuotaProbeBodySnippet(respBody)).
+			WithField("body_snippet", codexQuotaProbeBodySnippet(respBody)).
 			Warn("codex quota probe upstream returned non-2xx")
 		return
 	}
 
 	if !json.Valid(respBody) {
 		log.WithFields(fields).
-			WithField("body", codexQuotaProbeBodySnippet(respBody)).
+			WithField("body_snippet", codexQuotaProbeBodySnippet(respBody)).
 			Warn("codex quota probe upstream returned invalid json")
 		return
 	}
@@ -270,7 +271,8 @@ func (h *Handler) logCodexQuotaProbeResult(auth *coreauth.Auth, authIndex string
 	}
 
 	log.WithFields(fields).
-		WithField("body", codexQuotaProbeBodySnippet(respBody)).
+		WithField("payload_shape", codexQuotaProbePayloadShape(respBody)).
+		WithField("body_snippet", codexQuotaProbeBodySnippet(respBody)).
 		Warn("codex quota probe upstream payload was not recognized")
 }
 
@@ -280,6 +282,70 @@ func codexQuotaProbeBodySnippet(body []byte) string {
 		return trimmed
 	}
 	return trimmed[:codexQuotaProbeLogBodyLimit] + "...(truncated)"
+}
+
+func codexQuotaProbePayloadShape(body []byte) string {
+	var root map[string]any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return "invalid_json"
+	}
+
+	parts := []string{"root_keys=" + strings.Join(sortedMapKeys(root), ",")}
+	if planType, ok := root["plan_type"]; ok {
+		parts = append(parts, "plan_type="+fmt.Sprint(planType))
+	}
+	for _, path := range []string{"rate_limit", "rateLimit", "code_review_rate_limit", "codeReviewRateLimit"} {
+		rateLimit, ok := root[path].(map[string]any)
+		if !ok {
+			continue
+		}
+		parts = append(parts, path+"_keys="+strings.Join(sortedMapKeys(rateLimit), ","))
+		for _, key := range []string{"allowed", "limit_reached", "limitReached"} {
+			if value, exists := rateLimit[key]; exists {
+				parts = append(parts, path+"."+key+"="+fmt.Sprint(value))
+			}
+		}
+		for _, windowKey := range []string{"primary_window", "primaryWindow", "secondary_window", "secondaryWindow"} {
+			window, ok := rateLimit[windowKey].(map[string]any)
+			if !ok {
+				continue
+			}
+			parts = append(parts, path+"."+windowKey+"_keys="+strings.Join(sortedMapKeys(window), ","))
+		}
+	}
+	if additional, exists := root["additional_rate_limits"]; exists {
+		parts = append(parts, "additional_rate_limits="+summarizeJSONValueShape(additional))
+	}
+
+	return strings.Join(parts, " ")
+}
+
+func summarizeJSONValueShape(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		return "object:" + strings.Join(sortedMapKeys(typed), ",")
+	case []any:
+		if len(typed) == 0 {
+			return "array:0"
+		}
+		if first, ok := typed[0].(map[string]any); ok {
+			return fmt.Sprintf("array:%d:first_keys=%s", len(typed), strings.Join(sortedMapKeys(first), ","))
+		}
+		return fmt.Sprintf("array:%d", len(typed))
+	case nil:
+		return "null"
+	default:
+		return fmt.Sprintf("%T", value)
+	}
+}
+
+func sortedMapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (h *Handler) syncQuotaProbeFromAPICall(ctx context.Context, auth *coreauth.Auth, requestURL *url.URL, statusCode int, respBody []byte) {
