@@ -35,10 +35,12 @@ func TestRegisterModelsForAuth_CodexFreeFiltersStaticFallback(t *testing.T) {
 			seen[model.ID] = struct{}{}
 		}
 	}
-	if _, ok := seen["gpt-5.2-codex"]; !ok {
-		t.Fatalf("expected gpt-5.2-codex to remain available")
+	for _, allowed := range []string{"gpt-5.4-mini", "gpt-5.5", "gpt-5.6-terra", "gpt-5.6-luna", "codex-auto-review"} {
+		if _, ok := seen[allowed]; !ok {
+			t.Fatalf("expected %s to remain available", allowed)
+		}
 	}
-	for _, blocked := range []string{"gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.5"} {
+	for _, blocked := range []string{"gpt-5.2-codex", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.6-sol"} {
 		if _, ok := seen[blocked]; ok {
 			t.Fatalf("expected %s to be filtered for free codex oauth auth", blocked)
 		}
@@ -72,12 +74,12 @@ func TestRegisterModelsForAuth_CodexTeamKeepsOnlyUpstreamTeamModels(t *testing.T
 			seen[model.ID] = struct{}{}
 		}
 	}
-	for _, allowed := range []string{"gpt-5.3-codex", "gpt-5.4", "gpt-5.5"} {
+	for _, allowed := range []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "codex-auto-review"} {
 		if _, ok := seen[allowed]; !ok {
 			t.Fatalf("expected %s to remain available for team codex oauth auth", allowed)
 		}
 	}
-	for _, blocked := range []string{"gpt-5.2-codex", "gpt-5.3-codex-spark", "gpt-5.1", "gpt-4o"} {
+	for _, blocked := range []string{"gpt-5.2-codex", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.1", "gpt-4o"} {
 		if _, ok := seen[blocked]; ok {
 			t.Fatalf("expected %s to be filtered for team codex oauth auth", blocked)
 		}

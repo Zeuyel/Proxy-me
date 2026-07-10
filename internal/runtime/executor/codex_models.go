@@ -11,17 +11,23 @@ import (
 )
 
 var (
-	codexFreeOAuthBlockedModelIDs = map[string]struct{}{
-		"gpt-5.3-codex":       {},
-		"gpt-5.3-codex-spark": {},
-		"gpt-5.4":             {},
-		"gpt-5.5":             {},
+	codexFreeOAuthAllowedModelIDs = map[string]struct{}{
+		"gpt-5.4-mini":      {},
+		"gpt-5.5":           {},
+		"gpt-5.6-terra":     {},
+		"gpt-5.6-luna":      {},
+		"codex-auto-review": {},
+		"gpt-image-2":       {},
 	}
 	codexTeamOAuthAllowedModelIDs = map[string]struct{}{
-		"gpt-5.3-codex": {},
-		"gpt-5.4":       {},
-		"gpt-5.5":       {},
-		"gpt-image-2":   {},
+		"gpt-5.4":           {},
+		"gpt-5.4-mini":      {},
+		"gpt-5.5":           {},
+		"gpt-5.6-sol":       {},
+		"gpt-5.6-terra":     {},
+		"gpt-5.6-luna":      {},
+		"codex-auto-review": {},
+		"gpt-image-2":       {},
 	}
 )
 
@@ -69,8 +75,8 @@ const (
 func codexModelAllowedForAccessLevel(accessLevel codexOAuthAccess, modelID string) bool {
 	switch accessLevel {
 	case codexOAuthAccessFree:
-		_, blocked := codexFreeOAuthBlockedModelIDs[modelID]
-		return !blocked
+		_, allowed := codexFreeOAuthAllowedModelIDs[modelID]
+		return allowed
 	case codexOAuthAccessPaid:
 		return true
 	case codexOAuthAccessTeam:

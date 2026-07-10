@@ -14,6 +14,7 @@ import (
 	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -154,6 +155,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true)
+	applyModelHeaderOverrides(httpReq.Header, baseModel)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
 	var authID, authLabel, authType, authValue string
@@ -197,6 +199,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 				return resp, err
 			}
 			applyCodexHeaders(httpReq, auth, apiKey, true)
+			applyModelHeaderOverrides(httpReq.Header, baseModel)
 			applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 			applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
 			recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
@@ -312,6 +315,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, false)
+	applyModelHeaderOverrides(httpReq.Header, baseModel)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
 	var authID, authLabel, authType, authValue string
@@ -418,6 +422,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true)
+	applyModelHeaderOverrides(httpReq.Header, baseModel)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
 	var authID, authLabel, authType, authValue string
@@ -466,6 +471,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				return nil, err
 			}
 			applyCodexHeaders(httpReq, auth, apiKey, true)
+			applyModelHeaderOverrides(httpReq.Header, baseModel)
 			applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 			applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
 			recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
@@ -1396,6 +1402,22 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
 	deleteDeprecatedCodexConversationHeader(r.Header)
+}
+
+func applyModelHeaderOverrides(headers http.Header, modelName string) {
+	if headers == nil {
+		return
+	}
+	overrides := registry.ModelOverrideHeaders(modelName)
+	if len(overrides) == 0 {
+		return
+	}
+	for key, value := range overrides {
+		headers.Set(key, value)
+	}
+	if strings.Contains(headers.Get("User-Agent"), "Mac OS") && strings.TrimSpace(headers.Get("Session_id")) == "" {
+		headers.Set("Session_id", uuid.NewString())
+	}
 }
 
 func ensureCodexWindowHeader(headers http.Header) {
