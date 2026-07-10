@@ -839,10 +839,6 @@ func GetOpenAIModels() []*ModelInfo {
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max"}},
-			Config: &ModelConfig{OverrideHeader: map[string]string{
-				"user-agent": "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)",
-				"originator": "codex-tui",
-			}},
 		},
 		{
 			ID:                  "codex-auto-review",

@@ -30,10 +30,10 @@ import (
 )
 
 const (
-	codexClientVersion     = "0.124.0"
-	defaultCodexUserAgent  = "codex_cli_rs/0.124.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+	codexClientVersion     = "0.144.0"
+	defaultCodexUserAgent  = "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)"
 	codexUsageURL          = "https://chatgpt.com/backend-api/wham/usage"
-	defaultCodexOriginator = "codex_cli_rs"
+	defaultCodexOriginator = "codex-tui"
 	codexResponsesBeta     = "responses_websockets=2026-02-06"
 	codexWebOrigin         = "https://chatgpt.com"
 	codexCodexReferer      = "https://chatgpt.com/codex"
