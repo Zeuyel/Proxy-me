@@ -19,6 +19,7 @@ type codexThreadIsolationState struct {
 	enabled                 bool
 	rejectProviderThread    bool
 	authScope               string
+	authKey                 string
 	model                   string
 	clientPromptCacheKey    string
 	canonicalPromptCacheKey string
@@ -27,6 +28,7 @@ type codexThreadIsolationState struct {
 type codexResponseBinding struct {
 	rawID                   string
 	authScope               string
+	clientSessionID         string
 	canonicalPromptCacheKey string
 	expires                 time.Time
 }
@@ -60,19 +62,32 @@ func newCodexThreadIsolationStateWithCanonical(auth *cliproxyauth.Auth, model, c
 	return codexThreadIsolationState{
 		enabled:                 true,
 		authScope:               scope,
+		authKey:                 codexAuthBindingKey(auth),
 		model:                   strings.TrimSpace(model),
 		clientPromptCacheKey:    clientPromptCacheKey,
 		canonicalPromptCacheKey: canonical,
 	}
 }
 
+func codexAuthBindingKey(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if index := strings.TrimSpace(auth.EnsureIndex()); index != "" {
+		return index
+	}
+	if accountID := strings.TrimSpace(resolveCodexAccountID(auth)); accountID != "" {
+		return accountID
+	}
+	return strings.TrimSpace(auth.ID)
+}
+
 func codexAuthScope(auth *cliproxyauth.Auth, model, clientTenant string) string {
 	if auth == nil {
 		return ""
 	}
-	authIndex := strings.TrimSpace(auth.EnsureIndex())
-	accountID := strings.TrimSpace(resolveCodexAccountID(auth))
-	if authIndex == "" && accountID == "" && strings.TrimSpace(auth.ID) == "" {
+	authKey := codexAuthBindingKey(auth)
+	if authKey == "" {
 		return ""
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
@@ -80,13 +95,6 @@ func codexAuthScope(auth *cliproxyauth.Auth, model, clientTenant string) string 
 	clientTenant = strings.TrimSpace(clientTenant)
 	if clientTenant != "" {
 		clientTenant = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex-tenant:\x00"+clientTenant)).String()
-	}
-	authKey := authIndex
-	if authKey == "" {
-		authKey = accountID
-	}
-	if authKey == "" {
-		authKey = strings.TrimSpace(auth.ID)
 	}
 	return strings.Join([]string{
 		"provider=" + provider,
@@ -252,7 +260,13 @@ func registerCodexResponseIDs(payload []byte, state codexThreadIsolationState) {
 	now := time.Now()
 	for _, rawID := range codexResponseIDs(payload) {
 		alias := codexResponseAlias(state.authScope, rawID)
-		binding := codexResponseBinding{rawID: rawID, authScope: state.authScope, canonicalPromptCacheKey: state.canonicalPromptCacheKey, expires: now.Add(codexThreadIdentityTTL)}
+		binding := codexResponseBinding{
+			rawID:                   rawID,
+			authScope:               state.authScope,
+			clientSessionID:         state.clientPromptCacheKey,
+			canonicalPromptCacheKey: state.canonicalPromptCacheKey,
+			expires:                 now.Add(codexThreadIdentityTTL),
+		}
 		codexResponseBindings.Lock()
 		for key, existing := range codexResponseBindings.byID {
 			if existing.expires.Before(now) {
@@ -262,6 +276,7 @@ func registerCodexResponseIDs(payload []byte, state codexThreadIsolationState) {
 		codexResponseBindings.byID[rawID] = binding
 		codexResponseBindings.byID[alias] = binding
 		codexResponseBindings.Unlock()
+		cliproxyauth.RegisterSessionAlias(alias, state.clientPromptCacheKey, state.authKey)
 	}
 }
 

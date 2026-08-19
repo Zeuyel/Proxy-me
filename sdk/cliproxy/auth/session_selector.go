@@ -594,6 +594,9 @@ func extractSessionIDFromOriginalRequest(rawJSON []byte) string {
 		return value
 	}
 	if value := sanitizeCodexSessionIDSelector(gjson.GetBytes(rawJSON, "previous_response_id").String()); value != "" {
+		if sessionID, _, ok := ResolveSessionAlias(value); ok {
+			return sessionID
+		}
 		if prefixed := codexSessionPrefixSelector + value; len(prefixed) <= sessionIDMaxLengthSelector {
 			return prefixed
 		}

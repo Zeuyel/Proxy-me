@@ -204,3 +204,44 @@ func TestSessionSelectorPick_FailsOverFromUnavailableFileBinding(t *testing.T) {
 		t.Fatalf("sticky fallback Pick() selected = %v, want auth-b", third)
 	}
 }
+
+func TestSessionSelectorPick_ResolvesCodexResponseAliasToOriginalSession(t *testing.T) {
+	selector := NewSessionSelector(SessionSelectorConfig{
+		Enabled:          true,
+		Providers:        []string{"codex"},
+		TTL:              5 * time.Minute,
+		FailureThreshold: 1,
+		Cooldown:         5 * time.Minute,
+		LoadWindow:       0,
+	})
+	authA := &Auth{ID: "auth-a", FileName: "codex-a-alias.json", Provider: "codex", Status: StatusActive}
+	authB := &Auth{ID: "auth-b", FileName: "codex-b-alias.json", Provider: "codex", Status: StatusActive}
+	firstOpts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"prompt_cache_key":"client-alias-session-1234567890"}`)}
+	first, err := selector.Pick(context.Background(), "codex", "test-model", firstOpts, []*Auth{authA, authB})
+	if err != nil {
+		t.Fatalf("initial Pick() error = %v", err)
+	}
+	if first != authA {
+		t.Fatalf("initial Pick() selected = %v, want auth-a", first)
+	}
+
+	RegisterSessionAlias("codex_resp_selector_alias_1234567890", "client-alias-session-1234567890", authBindingKey(authA))
+	aliasOpts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"previous_response_id":"codex_resp_selector_alias_1234567890"}`)}
+	selected, err := selector.Pick(context.Background(), "codex", "test-model", aliasOpts, []*Auth{authA, authB})
+	if err != nil {
+		t.Fatalf("alias Pick() error = %v", err)
+	}
+	if selected != authA {
+		t.Fatalf("alias Pick() selected = %v, want original auth-a", selected)
+	}
+
+	authA.Unavailable = true
+	authA.NextRetryAfter = time.Now().Add(time.Hour)
+	selected, err = selector.Pick(context.Background(), "codex", "test-model", aliasOpts, []*Auth{authA, authB})
+	if err != nil {
+		t.Fatalf("alias failover Pick() error = %v", err)
+	}
+	if selected != authB {
+		t.Fatalf("alias failover Pick() selected = %v, want auth-b", selected)
+	}
+}

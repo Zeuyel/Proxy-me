@@ -1167,7 +1167,9 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	if threadScope != "" && cache.ID != "" {
 		if binding, ok := resolveCodexResponseBinding(cache.ID, threadScope); ok {
 			canonicalThreadID = binding.canonicalPromptCacheKey
-			cache.ID = ""
+			cache.ID = binding.clientSessionID
+		} else if sessionID, _, ok := cliproxyauth.ResolveSessionAlias(cache.ID); ok {
+			cache.ID = sessionID
 		}
 	}
 	threadIsolation := newCodexThreadIsolationStateWithCanonical(auth, req.Model, cache.ID, opts, threadScope, canonicalThreadID)
