@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -70,7 +71,7 @@ func (r *usageReporter) trackFailure(ctx context.Context, errPtr *error) {
 	if r == nil || errPtr == nil {
 		return
 	}
-	if *errPtr != nil {
+	if *errPtr != nil && !cliproxyexecutor.IsCapacityError(*errPtr) {
 		// Resolve status code from executor error first, then gin context.
 		// This avoids recording 200 for streaming paths where headers were already committed
 		// but the upstream later failed with a concrete status (e.g. 404/408).

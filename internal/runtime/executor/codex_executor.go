@@ -44,6 +44,12 @@ const (
 
 var dataTag = []byte("data:")
 
+const codexCapacityMessage = "selected model is at capacity"
+
+func isCodexCapacityPayload(payload []byte) bool {
+	return strings.Contains(strings.ToLower(string(payload)), codexCapacityMessage)
+}
+
 // CodexExecutor is a stateless executor for Codex (OpenAI Responses API entrypoint).
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type CodexExecutor struct {
@@ -259,6 +265,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 
 		line = bytes.TrimSpace(line[5:])
+		clientLine := applyCodexClientResponsePayload(line, identityState)
+		if isCodexCapacityPayload(clientLine) {
+			err = newCodexStatusErr(ctx, httpClient, auth, http.StatusTooManyRequests, clientLine, httpResp.Header)
+			return resp, err
+		}
 		if gjson.GetBytes(line, "type").String() != "response.completed" {
 			continue
 		}
@@ -268,7 +279,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 
 		var param any
-		clientLine := applyCodexClientResponsePayload(line, identityState)
 		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, clientLine, &param)
 		resp = cliproxyexecutor.Response{Payload: []byte(out)}
 		return resp, nil
@@ -366,6 +376,10 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	reporter.ensurePublished(ctx)
 	var param any
 	clientData := applyCodexClientResponsePayload(upstreamData, identityState)
+	if isCodexCapacityPayload(clientData) {
+		err = newCodexStatusErr(ctx, httpClient, auth, http.StatusTooManyRequests, clientData, httpResp.Header)
+		return resp, err
+	}
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, clientData, &param)
 	resp = cliproxyexecutor.Response{Payload: []byte(out)}
 	return resp, nil
@@ -538,6 +552,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 
 			clientLine := applyCodexClientResponsePayload(line, identityState)
+			if isCodexCapacityPayload(clientLine) {
+				capacityErr := newCodexStatusErr(ctx, httpClient, auth, http.StatusTooManyRequests, clientLine, httpResp.Header)
+				out <- cliproxyexecutor.StreamChunk{Err: capacityErr}
+				return
+			}
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, body, clientLine, &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
@@ -597,7 +616,14 @@ type codexQuotaCooldownHint struct {
 }
 
 func newCodexStatusErr(ctx context.Context, client *http.Client, auth *cliproxyauth.Auth, statusCode int, body []byte, headers http.Header) statusErr {
-	sErr := statusErr{code: statusCode, msg: string(body)}
+	sErr := statusErr{code: statusCode, msg: string(body), capacity: isCodexCapacityPayload(body)}
+	if sErr.capacity {
+		sErr.code = http.StatusTooManyRequests
+		if retryAfter := parseRetryAfterHeader(headers); retryAfter != nil {
+			sErr.retryAfter = retryAfter
+		}
+		return sErr
+	}
 	if statusCode != http.StatusTooManyRequests {
 		return sErr
 	}

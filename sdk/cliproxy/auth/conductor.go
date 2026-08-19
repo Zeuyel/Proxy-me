@@ -55,6 +55,8 @@ const (
 	refreshIneffectiveBackoff = 30 * time.Second
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
+	capacityRetryBase         = time.Second
+	capacityRetryMax          = 30 * time.Second
 )
 
 type authExecutionResult struct {
@@ -595,7 +597,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	for attempt := 0; ; attempt++ {
 		chunks, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts)
 		if errStream == nil {
-			return chunks, nil
+			return m.retryCapacityStream(ctx, normalized, req, opts, chunks), nil
 		}
 		lastErr = errStream
 		wait, shouldRetry := m.shouldRetryAfterError(errStream, attempt, normalized, req.Model, maxWait)
@@ -610,6 +612,80 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, lastErr
 	}
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
+func (m *Manager) retryCapacityStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, chunks <-chan cliproxyexecutor.StreamChunk) <-chan cliproxyexecutor.StreamChunk {
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		current := chunks
+		retryAttempt := 0
+		send := func(chunk cliproxyexecutor.StreamChunk) bool {
+			if ctx == nil {
+				out <- chunk
+				return true
+			}
+			select {
+			case <-ctx.Done():
+				return false
+			case out <- chunk:
+				return true
+			}
+		}
+		receive := func(stream <-chan cliproxyexecutor.StreamChunk) (cliproxyexecutor.StreamChunk, bool) {
+			if ctx == nil {
+				chunk, ok := <-stream
+				return chunk, ok
+			}
+			select {
+			case <-ctx.Done():
+				return cliproxyexecutor.StreamChunk{}, false
+			case chunk, ok := <-stream:
+				return chunk, ok
+			}
+		}
+
+	streamLoop:
+		for {
+			sentPayload := false
+			for {
+				chunk, ok := receive(current)
+				if !ok {
+					return
+				}
+				if chunk.Err != nil && cliproxyexecutor.IsCapacityError(chunk.Err) && !sentPayload && len(chunk.Payload) == 0 {
+					retryErr := chunk.Err
+					for {
+						wait := capacityRetryDelay(retryErr, retryAttempt)
+						retryAttempt++
+						if errWait := waitForCooldown(ctx, wait); errWait != nil {
+							return
+						}
+						next, errRetry := m.executeStreamMixedOnce(ctx, providers, req, opts)
+						if errRetry == nil {
+							current = next
+							continue streamLoop
+						}
+						if !cliproxyexecutor.IsCapacityError(errRetry) {
+							_ = send(cliproxyexecutor.StreamChunk{Err: errRetry})
+							return
+						}
+						retryErr = errRetry
+					}
+				}
+				if len(chunk.Payload) > 0 {
+					sentPayload = true
+				}
+				if !send(chunk) {
+					return
+				}
+				if chunk.Err != nil {
+					return
+				}
+			}
+		}
+	}()
+	return out
 }
 
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -651,7 +727,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				result.RetryAfter = ra
 			}
 			result.QuotaReason = quotaReasonFromError(errExec)
-			m.MarkResult(ctx, result)
+			if !cliproxyexecutor.IsCapacityError(errExec) {
+				m.MarkResult(ctx, result)
+			}
 			lastErr = errExec
 			if !shouldRotateAuthOnError(errExec) {
 				return cliproxyexecutor.Response{}, errExec
@@ -702,7 +780,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				result.RetryAfter = ra
 			}
 			result.QuotaReason = quotaReasonFromError(errExec)
-			m.MarkResult(ctx, result)
+			if !cliproxyexecutor.IsCapacityError(errExec) {
+				m.MarkResult(ctx, result)
+			}
 			lastErr = errExec
 			if !shouldRotateAuthOnError(errExec) {
 				return cliproxyexecutor.Response{}, errExec
@@ -751,7 +831,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			result.QuotaReason = quotaReasonFromError(errStream)
-			m.MarkResult(ctx, result)
+			if !cliproxyexecutor.IsCapacityError(errStream) {
+				m.MarkResult(ctx, result)
+			}
 			lastErr = errStream
 			if !shouldRotateAuthOnError(errStream) {
 				return nil, errStream
@@ -778,7 +860,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					result := Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr}
 					result.RetryAfter = retryAfterFromError(chunk.Err)
 					result.QuotaReason = quotaReasonFromError(chunk.Err)
-					m.MarkResult(streamCtx, result)
+					if !cliproxyexecutor.IsCapacityError(chunk.Err) {
+						m.MarkResult(streamCtx, result)
+					}
 				}
 				if !forward {
 					continue
@@ -1292,6 +1376,9 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if err == nil {
 		return 0, false
 	}
+	if cliproxyexecutor.IsCapacityError(err) {
+		return capacityRetryDelay(err, attempt), true
+	}
 	if maxWait <= 0 {
 		return 0, false
 	}
@@ -1308,9 +1395,29 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	return wait, true
 }
 
+func capacityRetryDelay(err error, attempt int) time.Duration {
+	if retryAfter := retryAfterFromError(err); retryAfter != nil && *retryAfter > 0 {
+		return *retryAfter
+	}
+	if attempt < 0 {
+		attempt = 0
+	}
+	wait := capacityRetryBase
+	for i := 0; i < attempt && wait < capacityRetryMax; i++ {
+		wait *= 2
+	}
+	if wait > capacityRetryMax {
+		return capacityRetryMax
+	}
+	return wait
+}
+
 func waitForCooldown(ctx context.Context, wait time.Duration) error {
 	if wait <= 0 {
 		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()

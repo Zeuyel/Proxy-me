@@ -555,6 +555,7 @@ type statusErr struct {
 	msg         string
 	retryAfter  *time.Duration
 	quotaReason string
+	capacity    bool
 }
 
 func (e statusErr) Error() string {
@@ -566,3 +567,4 @@ func (e statusErr) Error() string {
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
 func (e statusErr) QuotaReason() string        { return e.quotaReason }
+func (e statusErr) IsCapacityError() bool      { return e.capacity }

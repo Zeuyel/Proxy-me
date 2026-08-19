@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 
@@ -68,4 +69,20 @@ type StreamChunk struct {
 type StatusError interface {
 	error
 	StatusCode() int
+}
+
+// CapacityError marks a transient provider capacity response that should not
+// change account health or consume the normal request retry budget.
+type CapacityError interface {
+	error
+	IsCapacityError() bool
+}
+
+// IsCapacityError reports whether err represents a transient capacity response.
+func IsCapacityError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var capacityErr CapacityError
+	return errors.As(err, &capacityErr) && capacityErr != nil && capacityErr.IsCapacityError()
 }
