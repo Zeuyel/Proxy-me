@@ -146,10 +146,13 @@ func TestCodexThreadIsolationBindsPreviousAliasToStablePromptCacheKey(t *testing
 	if clientResponseID == "" || clientResponseID == "resp-stable-1234567890" {
 		t.Fatalf("response was not aliased: %q", clientResponseID)
 	}
+	if sessionID, _, ok := cliproxyauth.ResolveSessionAlias(clientResponseID); !ok || sessionID != "client-session-stable-1234567890" {
+		t.Fatalf("response alias session binding = %q/%v, want original client session", sessionID, ok)
+	}
 
 	second := cliproxyexecutor.Request{
 		Model:   "gpt-5-codex",
-		Payload: []byte(`{"model":"gpt-5-codex","input":"second","previous_response_id":"` + clientResponseID + `"}`),
+		Payload: []byte(`{"model":"gpt-5-codex","input":"second","prompt_cache_key":"codex_prev_` + clientResponseID + `","previous_response_id":"` + clientResponseID + `"}`),
 	}
 	_, secondBody, secondState, err := exec.cacheHelper(context.Background(), opts.SourceFormat, "https://example.com/responses", auth, second, opts, second.Payload, second.Payload)
 	if err != nil {
@@ -168,7 +171,7 @@ func TestCodexThreadIsolationBindsPreviousAliasToStablePromptCacheKey(t *testing
 	secondResponseID := gjson.GetBytes(secondPayload[len("data:"):], "response.id").String()
 	third := cliproxyexecutor.Request{
 		Model:   "gpt-5-codex",
-		Payload: []byte(`{"model":"gpt-5-codex","input":"third","previous_response_id":"` + secondResponseID + `"}`),
+		Payload: []byte(`{"model":"gpt-5-codex","input":"third","prompt_cache_key":"codex_prev_` + secondResponseID + `","previous_response_id":"` + secondResponseID + `"}`),
 	}
 	_, thirdBody, _, err := exec.cacheHelper(context.Background(), opts.SourceFormat, "https://example.com/responses", auth, third, opts, third.Payload, third.Payload)
 	if err != nil {
