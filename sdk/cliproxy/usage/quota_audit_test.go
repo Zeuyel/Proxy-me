@@ -134,3 +134,33 @@ func TestQuotaAuditCostTreatsReasoningAndCachedAsSubsets(t *testing.T) {
 		t.Fatalf("expected input-cached + non-reasoning output + reasoning + cached cost 3.55, got %v (ok=%t)", cost, ok)
 	}
 }
+
+func TestQuotaAuditParsesAliasesAndRejectsInvalidNumbers(t *testing.T) {
+	store := NewQuotaAuditStore()
+	observedAt := time.Date(2026, 8, 20, 5, 0, 0, 0, time.UTC)
+	payload := []byte(`{"rateLimit":{"primaryWindow":{"usedPercent":"NaN","remainingFraction":0.75,"resetAt":"2026-08-20T06:00:00.123Z"}},"additionalRateLimits":[{"secondaryWindow":{"usedPercent":25}}]}`)
+	if got := store.RecordQuotaSnapshot("auth", "index", "", observedAt, payload); got != 2 {
+		t.Fatalf("expected two aliased windows, got %d", got)
+	}
+	rows := store.Build(QuotaAuditQuery{}, observedAt).Rows
+	if rows[0].UsedPercent != nil || rows[0].RemainingPercent == nil || *rows[0].RemainingPercent != 75 {
+		t.Fatalf("expected invalid used and valid remaining fraction, got %#v", rows[0])
+	}
+	if rows[0].ResetAt == nil || !rows[0].ResetAt.Equal(time.Date(2026, 8, 20, 6, 0, 0, 123000000, time.UTC)) {
+		t.Fatalf("expected RFC3339 reset timestamp, got %v", rows[0].ResetAt)
+	}
+}
+
+func TestQuotaAuditPriceSnapshotCopiesPointerRates(t *testing.T) {
+	store := NewQuotaAuditStore()
+	input := 1.0
+	output := 2.0
+	price := PriceSnapshot{InputPerMillionUSD: &input, OutputPerMillionUSD: &output}
+	store.SetPriceSnapshot("model", price)
+	input = 9
+	output = 9
+	exported := store.Export()
+	if exported.PriceSnapshots["model"].InputPerMillionUSD == nil || *exported.PriceSnapshots["model"].InputPerMillionUSD != 1 {
+		t.Fatalf("price snapshot was mutated through caller pointer: %#v", exported.PriceSnapshots["model"])
+	}
+}

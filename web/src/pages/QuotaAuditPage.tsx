@@ -81,6 +81,11 @@ const toText = (value: unknown): string => (typeof value === 'string' ? value.tr
 const toBoolean = (value: unknown): boolean =>
   value === true || value === 1 || value === '1' || value === 'true';
 
+const toStringArray = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value.map(toText).filter(Boolean);
+};
+
 const readNumber = (record: Record<string, unknown>, keys: string[], fallback: number | null = null) =>
   toNumber(firstValue(record, keys)) ?? fallback;
 
@@ -101,6 +106,8 @@ const normalizeRow = (value: unknown): QuotaAuditRow | null => {
   const account = toText(firstValue(value, ['account', 'email', 'auth_name'])) || undefined;
   const timestamp = toText(firstValue(value, ['timestamp', 'time', 'at', 'observed_at']));
   const window = toText(firstValue(value, ['window', 'quota_window', 'window_name'])) || 'unknown';
+  const snapshotId = toText(firstValue(value, ['snapshot_id', 'snapshotId', 'id'])) || undefined;
+  const planType = toText(firstValue(value, ['plan_type', 'planType'])) || undefined;
   const model = toText(firstValue(value, ['model', 'model_name'])) || undefined;
   const tokenSource = firstValue(value, ['tokens', 'token_delta', 'token_usage', 'usage']) ?? value;
   const status = toText(value.status) as QuotaAuditStatus | undefined;
@@ -109,12 +116,17 @@ const normalizeRow = (value: unknown): QuotaAuditRow | null => {
   if (!timestamp && auth === 'unknown') return null;
 
   return {
+    snapshot_id: snapshotId,
     auth,
     account,
     window,
+    plan_type: planType,
     model,
+    session_ids: toStringArray(firstValue(value, ['session_ids', 'sessionIds', 'sessions'])),
+    thread_ids: toStringArray(firstValue(value, ['thread_ids', 'threadIds', 'threads'])),
     timestamp,
     used_percent: readNumber(value, ['used_percent', 'quota_used_percent', 'used']),
+    remaining_percent: readNumber(value, ['remaining_percent', 'remainingPercent', 'remaining']),
     quota_delta_percent: readNumber(value, ['quota_delta_percent', 'quota_delta', 'delta_percent']),
     tokens: normalizeTokens(tokenSource),
     cost_delta_usd: readNumber(value, ['cost_delta_usd', 'cost_delta', 'delta_cost_usd']),
@@ -123,6 +135,7 @@ const normalizeRow = (value: unknown): QuotaAuditRow | null => {
       'cost_per_quota',
       'unit_quota_cost_usd'
     ]),
+    cost_status: toText(firstValue(value, ['cost_status', 'costStatus'])) || undefined,
     status,
     reset: toBoolean(value.reset),
     reset_at: toText(firstValue(value, ['reset_at', 'quota_reset_at'])) || null,
@@ -136,7 +149,11 @@ const normalizeRow = (value: unknown): QuotaAuditRow | null => {
           cached_per_million_usd: readNumber(priceSnapshot, ['cached_per_million_usd']),
           currency: toText(priceSnapshot.currency) || undefined,
           captured_at: toText(priceSnapshot.captured_at) || undefined,
-          source: toText(priceSnapshot.source) || undefined
+          source: toText(priceSnapshot.source) || undefined,
+          version: toText(priceSnapshot.version) || undefined,
+          fingerprint: toText(priceSnapshot.fingerprint) || undefined,
+          unit: toText(priceSnapshot.unit) || undefined,
+          immutable: toBoolean(priceSnapshot.immutable)
         }
       : null
   };

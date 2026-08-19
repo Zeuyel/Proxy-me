@@ -22,19 +22,29 @@ export interface QuotaAuditPriceSnapshot {
   currency?: string;
   captured_at?: string;
   source?: string;
+  version?: string;
+  fingerprint?: string;
+  unit?: string;
+  immutable?: boolean;
 }
 
 export interface QuotaAuditRow {
+  snapshot_id?: string;
   auth: string;
   account?: string;
   window: string;
+  plan_type?: string;
   model?: string;
+  session_ids?: string[];
+  thread_ids?: string[];
   timestamp: string;
   used_percent?: number | null;
+  remaining_percent?: number | null;
   quota_delta_percent?: number | null;
   tokens: QuotaAuditTokens;
   cost_delta_usd?: number | null;
   cost_per_quota_percent?: number | null;
+  cost_status?: string;
   status?: QuotaAuditStatus;
   reset?: boolean;
   reset_at?: string | null;

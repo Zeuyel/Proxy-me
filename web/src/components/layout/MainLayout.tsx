@@ -367,7 +367,7 @@ export function MainLayout() {
     { path: '/auth-files', label: t('nav.auth_files'), icon: sidebarIcons.authFiles },
     { path: '/oauth', label: t('nav.oauth', { defaultValue: 'OAuth' }), icon: sidebarIcons.oauth },
     { path: '/usage', label: t('nav.usage_stats'), icon: sidebarIcons.usage },
-    { path: '/quota-audit', label: t('nav.quota_audit'), icon: sidebarIcons.quotaAudit },
+    { path: '/usage/quota-audit', label: t('nav.quota_audit'), icon: sidebarIcons.quotaAudit },
     { path: '/config', label: t('nav.config_management'), icon: sidebarIcons.config },
     ...(config?.loggingToFile
       ? [{ path: '/logs', label: t('nav.logs'), icon: sidebarIcons.logs }]

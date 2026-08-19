@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -176,9 +177,15 @@ func (s *QuotaAuditStore) SetPriceSnapshot(model string, snapshot PriceSnapshot)
 	if model == "" {
 		return
 	}
+	for _, rate := range []*float64{snapshot.InputPerMillionUSD, snapshot.OutputPerMillionUSD, snapshot.ReasoningPerMillionUSD, snapshot.CachedPerMillionUSD} {
+		if rate != nil && (math.IsNaN(*rate) || math.IsInf(*rate, 0) || *rate < 0) {
+			return
+		}
+	}
 	if snapshot.CapturedAt.IsZero() {
 		snapshot.CapturedAt = time.Now().UTC()
 	}
+	snapshot = clonePriceSnapshot(snapshot)
 	s.mu.Lock()
 	if s.prices == nil {
 		s.prices = make(map[string]PriceSnapshot)
@@ -211,7 +218,7 @@ func (s *QuotaAuditStore) CaptureUsage(record Record) {
 	}
 	s.mu.Lock()
 	if price, ok := s.prices[strings.TrimSpace(record.Model)]; ok {
-		priceCopy := price
+		priceCopy := clonePriceSnapshot(price)
 		item.PriceSnapshot = &priceCopy
 		tokens := QuotaAuditTokens{Input: item.InputTokens, Output: item.OutputTokens, Reasoning: item.ReasoningTokens, Cached: item.CachedTokens, Total: item.TotalTokens}
 		if cost, valid := calculateCost(tokens, price); valid {
@@ -272,7 +279,7 @@ func (s *QuotaAuditStore) Export() QuotaAuditExport {
 	result.Snapshots = append([]QuotaWindowSnapshot(nil), s.snapshots...)
 	result.Usage = append([]QuotaAuditUsage(nil), s.usage...)
 	for key, value := range s.prices {
-		result.PriceSnapshots[key] = value
+		result.PriceSnapshots[key] = clonePriceSnapshot(value)
 	}
 	s.mu.RUnlock()
 	return result
@@ -289,7 +296,7 @@ func (s *QuotaAuditStore) Merge(export QuotaAuditExport) (addedSnapshots, addedU
 	}
 	for model, price := range export.PriceSnapshots {
 		if _, exists := s.prices[model]; !exists {
-			s.prices[model] = price
+			s.prices[model] = clonePriceSnapshot(price)
 		}
 	}
 	for _, snapshot := range export.Snapshots {
@@ -328,7 +335,30 @@ func (s *QuotaAuditStore) Merge(export QuotaAuditExport) (addedSnapshots, addedU
 
 func usageKey(item QuotaAuditUsage) string {
 	return strings.Join([]string{item.AuthID, item.AuthIndex, item.RequestID, item.SessionID,
-		item.Model, item.Timestamp.UTC().Format(time.RFC3339Nano), strconv.FormatInt(item.TotalTokens, 10)}, "|")
+		item.Model, item.Timestamp.UTC().Format(time.RFC3339Nano), strconv.FormatInt(item.InputTokens, 10),
+		strconv.FormatInt(item.OutputTokens, 10), strconv.FormatInt(item.ReasoningTokens, 10),
+		strconv.FormatInt(item.CachedTokens, 10), strconv.FormatInt(item.TotalTokens, 10)}, "|")
+}
+
+func clonePriceSnapshot(snapshot PriceSnapshot) PriceSnapshot {
+	clone := snapshot
+	if snapshot.InputPerMillionUSD != nil {
+		value := *snapshot.InputPerMillionUSD
+		clone.InputPerMillionUSD = &value
+	}
+	if snapshot.OutputPerMillionUSD != nil {
+		value := *snapshot.OutputPerMillionUSD
+		clone.OutputPerMillionUSD = &value
+	}
+	if snapshot.ReasoningPerMillionUSD != nil {
+		value := *snapshot.ReasoningPerMillionUSD
+		clone.ReasoningPerMillionUSD = &value
+	}
+	if snapshot.CachedPerMillionUSD != nil {
+		value := *snapshot.CachedPerMillionUSD
+		clone.CachedPerMillionUSD = &value
+	}
+	return clone
 }
 
 type quotaGroup struct {
@@ -404,7 +434,7 @@ func (s *QuotaAuditStore) Build(query QuotaAuditQuery, now time.Time) QuotaAudit
 		}
 	} else if len(prices) == 1 {
 		for _, price := range prices {
-			copyPrice := price
+			copyPrice := clonePriceSnapshot(price)
 			result.PriceSnapshot = &copyPrice
 		}
 	}
@@ -538,7 +568,7 @@ func buildQuotaAuditRow(snapshot QuotaWindowSnapshot, previous *QuotaWindowSnaps
 		}
 		cost += *item.CostUSD
 		if row.PriceSnapshot == nil && item.PriceSnapshot != nil {
-			priceCopy := *item.PriceSnapshot
+			priceCopy := clonePriceSnapshot(*item.PriceSnapshot)
 			row.PriceSnapshot = &priceCopy
 		}
 	}
@@ -787,11 +817,14 @@ func parseCodexQuotaPayload(authID, authIndex, account string, observedAt time.T
 	for _, path := range []string{"rate_limit", "rateLimit", "code_review_rate_limit", "codeReviewRateLimit"} {
 		addRateLimit(path, root.Get(path))
 	}
-	additional := root.Get("additional_rate_limits")
-	if additional.Exists() && additional.Type == gjson.JSON {
-		additional.ForEach(func(key, value gjson.Result) bool {
+	for _, key := range []string{"additional_rate_limits", "additionalRateLimits"} {
+		additional := root.Get(key)
+		if !additional.Exists() || additional.Type != gjson.JSON {
+			continue
+		}
+		additional.ForEach(func(index, value gjson.Result) bool {
 			if value.Type == gjson.JSON {
-				addRateLimit("additional:"+key.String(), value)
+				addRateLimit("additional:"+index.String(), value)
 			}
 			return true
 		})
@@ -802,20 +835,20 @@ func parseCodexQuotaPayload(authID, authIndex, account string, observedAt time.T
 func makeQuotaSnapshot(authID, authIndex, account, planType, window string, observedAt time.Time, shape, version string, value gjson.Result) QuotaWindowSnapshot {
 	result := QuotaWindowSnapshot{AuthID: authID, AuthIndex: authIndex, Account: account, PlanType: planType, Window: window, ObservedAt: observedAt, CapturedAt: observedAt, Shape: shape, Version: version}
 	for _, key := range []string{"used_percent", "usedPercent"} {
-		if number, ok := quotaNumber(value.Get(key)); ok {
+		if number, ok := quotaPercent(value.Get(key)); ok {
 			result.UsedPercent = &number
 			break
 		}
 	}
 	for _, key := range []string{"remaining_percent", "remainingPercent"} {
-		if number, ok := quotaNumber(value.Get(key)); ok {
+		if number, ok := quotaPercent(value.Get(key)); ok {
 			result.RemainingPercent = &number
 			break
 		}
 	}
 	if result.RemainingPercent == nil {
 		for _, key := range []string{"remaining_fraction", "remainingFraction"} {
-			if number, ok := quotaNumber(value.Get(key)); ok {
+			if number, ok := quotaFraction(value.Get(key)); ok {
 				percent := number * 100
 				result.RemainingPercent = &percent
 				break
@@ -823,14 +856,14 @@ func makeQuotaSnapshot(authID, authIndex, account, planType, window string, obse
 		}
 	}
 	for _, key := range []string{"limit_window_seconds", "limitWindowSeconds", "window_seconds", "windowSeconds"} {
-		if number, ok := quotaNumber(value.Get(key)); ok {
+		if number, ok := quotaNumber(value.Get(key)); ok && number >= 0 {
 			result.WindowDurationSeconds = &number
 			break
 		}
 	}
 	if result.WindowDurationSeconds == nil {
 		for _, key := range []string{"limit_window_minutes", "limitWindowMinutes", "window_minutes", "windowMinutes"} {
-			if number, ok := quotaNumber(value.Get(key)); ok {
+			if number, ok := quotaNumber(value.Get(key)); ok && number >= 0 {
 				seconds := number * 60
 				result.WindowDurationSeconds = &seconds
 				break
@@ -893,7 +926,7 @@ func firstString(root gjson.Result, keys ...string) string {
 
 func quotaPayloadShape(root gjson.Result) string {
 	parts := make([]string, 0, 4)
-	for _, key := range []string{"rate_limit", "rateLimit", "code_review_rate_limit", "codeReviewRateLimit", "additional_rate_limits"} {
+	for _, key := range []string{"rate_limit", "rateLimit", "code_review_rate_limit", "codeReviewRateLimit", "additional_rate_limits", "additionalRateLimits"} {
 		if root.Get(key).Exists() {
 			parts = append(parts, key)
 		}
@@ -909,11 +942,30 @@ func quotaNumber(value gjson.Result) (float64, bool) {
 	if !value.Exists() {
 		return 0, false
 	}
+	var parsed float64
 	if value.Type == gjson.Number {
-		return value.Float(), true
+		parsed = value.Float()
+	} else {
+		var err error
+		parsed, err = strconv.ParseFloat(strings.TrimSpace(value.String()), 64)
+		if err != nil {
+			return 0, false
+		}
 	}
-	parsed, err := strconv.ParseFloat(strings.TrimSpace(value.String()), 64)
-	return parsed, err == nil
+	if math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func quotaPercent(value gjson.Result) (float64, bool) {
+	number, ok := quotaNumber(value)
+	return number, ok && number >= 0 && number <= 100
+}
+
+func quotaFraction(value gjson.Result) (float64, bool) {
+	number, ok := quotaNumber(value)
+	return number, ok && number >= 0 && number <= 1
 }
 
 func quotaTime(value gjson.Result) (time.Time, bool) {

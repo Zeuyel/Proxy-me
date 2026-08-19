@@ -119,11 +119,15 @@ func (h *Handler) PutQuotaAuditPrice(c *gin.Context) {
 		Model         string                  `json:"model"`
 		PriceSnapshot coreusage.PriceSnapshot `json:"price_snapshot"`
 	}
-	if err := c.ShouldBindJSON(&payload); err != nil || payload.Model == "" {
+	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "model and price_snapshot are required"})
 		return
 	}
 	payload.Model = strings.TrimSpace(payload.Model)
+	if payload.Model == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "model and price_snapshot are required"})
+		return
+	}
 	if payload.PriceSnapshot.InputPerMillionUSD == nil || payload.PriceSnapshot.OutputPerMillionUSD == nil ||
 		!validPriceRate(payload.PriceSnapshot.InputPerMillionUSD) || !validPriceRate(payload.PriceSnapshot.OutputPerMillionUSD) ||
 		!validPriceRate(payload.PriceSnapshot.ReasoningPerMillionUSD) || !validPriceRate(payload.PriceSnapshot.CachedPerMillionUSD) {
@@ -151,9 +155,12 @@ func (h *Handler) PutQuotaAuditPrice(c *gin.Context) {
 	if payload.PriceSnapshot.Version == "" {
 		payload.PriceSnapshot.Version = "1"
 	}
-	if payload.PriceSnapshot.Fingerprint == "" {
-		payload.PriceSnapshot.Fingerprint = priceFingerprint(payload.Model, payload.PriceSnapshot)
+	computedFingerprint := priceFingerprint(payload.Model, payload.PriceSnapshot)
+	if payload.PriceSnapshot.Fingerprint != "" && !strings.EqualFold(payload.PriceSnapshot.Fingerprint, computedFingerprint) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "price_snapshot fingerprint does not match its rates"})
+		return
 	}
+	payload.PriceSnapshot.Fingerprint = computedFingerprint
 	payload.PriceSnapshot.Immutable = true
 	coreusage.SetPriceSnapshot(payload.Model, payload.PriceSnapshot)
 	c.JSON(http.StatusOK, gin.H{"model": payload.Model, "price_snapshot": payload.PriceSnapshot})
