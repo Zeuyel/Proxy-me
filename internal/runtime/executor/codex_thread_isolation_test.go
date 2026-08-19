@@ -124,6 +124,97 @@ func TestCodexThreadIsolationOwnsPreviousResponseIDs(t *testing.T) {
 	}
 }
 
+func TestCodexThreadIsolationBindsPreviousAliasToStablePromptCacheKey(t *testing.T) {
+	exec := NewCodexExecutor(nil)
+	auth := &cliproxyauth.Auth{ID: "auth-stable", FileName: "codex-stable.json", Provider: "codex"}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}
+	first := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":"first","metadata":{"session_id":"client-session-stable-1234567890"}}`),
+	}
+	_, firstBody, firstState, err := exec.cacheHelper(context.Background(), opts.SourceFormat, "https://example.com/responses", auth, first, opts, first.Payload, first.Payload)
+	if err != nil {
+		t.Fatalf("first cacheHelper error: %v", err)
+	}
+	firstCacheKey := gjson.GetBytes(firstBody, "prompt_cache_key").String()
+	if firstCacheKey == "" || !firstState.threadIsolation.enabled {
+		t.Fatalf("first request did not establish a thread: body=%s state=%+v", firstBody, firstState.threadIsolation)
+	}
+	upstream := []byte(`data: {"type":"response.completed","response":{"id":"resp-stable-1234567890"}}`)
+	clientPayload := applyCodexClientResponsePayload(upstream, codexIdentityConfuseState{threadIsolation: firstState.threadIsolation})
+	clientResponseID := gjson.GetBytes(clientPayload[len("data:"):], "response.id").String()
+	if clientResponseID == "" || clientResponseID == "resp-stable-1234567890" {
+		t.Fatalf("response was not aliased: %q", clientResponseID)
+	}
+
+	second := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":"second","previous_response_id":"` + clientResponseID + `"}`),
+	}
+	_, secondBody, secondState, err := exec.cacheHelper(context.Background(), opts.SourceFormat, "https://example.com/responses", auth, second, opts, second.Payload, second.Payload)
+	if err != nil {
+		t.Fatalf("second cacheHelper error: %v", err)
+	}
+	if got := gjson.GetBytes(secondBody, "prompt_cache_key").String(); got != firstCacheKey {
+		t.Fatalf("second prompt_cache_key = %q, want stable %q", got, firstCacheKey)
+	}
+	if got := gjson.GetBytes(secondBody, "previous_response_id").String(); got != "resp-stable-1234567890" {
+		t.Fatalf("second previous_response_id = %q, want provider response ID", got)
+	}
+	if secondState.threadIsolation.canonicalPromptCacheKey != firstState.threadIsolation.canonicalPromptCacheKey {
+		t.Fatalf("canonical thread changed: %q != %q", secondState.threadIsolation.canonicalPromptCacheKey, firstState.threadIsolation.canonicalPromptCacheKey)
+	}
+	secondPayload := applyCodexClientResponsePayload([]byte(`data: {"type":"response.completed","response":{"id":"resp-stable-2345678901"}}`), codexIdentityConfuseState{threadIsolation: secondState.threadIsolation})
+	secondResponseID := gjson.GetBytes(secondPayload[len("data:"):], "response.id").String()
+	third := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":"third","previous_response_id":"` + secondResponseID + `"}`),
+	}
+	_, thirdBody, _, err := exec.cacheHelper(context.Background(), opts.SourceFormat, "https://example.com/responses", auth, third, opts, third.Payload, third.Payload)
+	if err != nil {
+		t.Fatalf("third cacheHelper error: %v", err)
+	}
+	if got := gjson.GetBytes(thirdBody, "prompt_cache_key").String(); got != firstCacheKey {
+		t.Fatalf("third prompt_cache_key = %q, want stable %q", got, firstCacheKey)
+	}
+}
+
+func TestCodexThreadIsolationForeignAliasGetsStableFallbackWithoutProviderID(t *testing.T) {
+	exec := NewCodexExecutor(nil)
+	authA := &cliproxyauth.Auth{ID: "auth-a", FileName: "codex-a.json", Provider: "codex"}
+	authB := &cliproxyauth.Auth{ID: "auth-b", FileName: "codex-b.json", Provider: "codex"}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}
+	first := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"model":"gpt-5-codex","input":"first","prompt_cache_key":"client-failover-thread-1234567890"}`)}
+	_, _, stateA, err := exec.cacheHelper(context.Background(), opts.SourceFormat, "https://example.com/responses", authA, first, opts, first.Payload, first.Payload)
+	if err != nil {
+		t.Fatalf("auth A cacheHelper error: %v", err)
+	}
+	clientPayload := applyCodexClientResponsePayload([]byte(`data: {"type":"response.completed","response":{"id":"resp-auth-a-1234567890"}}`), codexIdentityConfuseState{threadIsolation: stateA.threadIsolation})
+	foreignAlias := gjson.GetBytes(clientPayload[len("data:"):], "response.id").String()
+	if foreignAlias == "" {
+		t.Fatal("missing response alias")
+	}
+
+	fallback := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"model":"gpt-5-codex","input":"fallback","previous_response_id":"` + foreignAlias + `"}`)}
+	_, bodyB, stateB, err := exec.cacheHelper(context.Background(), opts.SourceFormat, "https://example.com/responses", authB, fallback, opts, fallback.Payload, fallback.Payload)
+	if err != nil {
+		t.Fatalf("auth B cacheHelper error: %v", err)
+	}
+	if gjson.GetBytes(bodyB, "previous_response_id").Exists() {
+		t.Fatalf("foreign provider response ID was forwarded: %s", bodyB)
+	}
+	if !stateB.threadIsolation.enabled || gjson.GetBytes(bodyB, "prompt_cache_key").String() == "" {
+		t.Fatalf("fallback did not establish a thread: body=%s state=%+v", bodyB, stateB.threadIsolation)
+	}
+	_, bodyBAgain, _, err := exec.cacheHelper(context.Background(), opts.SourceFormat, "https://example.com/responses", authB, fallback, opts, fallback.Payload, fallback.Payload)
+	if err != nil {
+		t.Fatalf("auth B repeated cacheHelper error: %v", err)
+	}
+	if gjson.GetBytes(bodyBAgain, "prompt_cache_key").String() != gjson.GetBytes(bodyB, "prompt_cache_key").String() {
+		t.Fatalf("fallback prompt_cache_key was not stable: %s != %s", bodyB, bodyBAgain)
+	}
+}
+
 func TestCodexThreadNamespaceIsStableConcurrently(t *testing.T) {
 	auth := threadIsolationTestAuth("auth-concurrent", "account-concurrent")
 	auth.EnsureIndex()

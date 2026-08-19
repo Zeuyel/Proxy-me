@@ -41,6 +41,7 @@ type SessionSelectorConfig struct {
 }
 
 type sessionBinding struct {
+	authKey       string
 	authID        string
 	lastUsed      time.Time
 	failCount     int
@@ -168,7 +169,7 @@ func (s *SessionSelector) Pick(ctx context.Context, provider, model string, opts
 
 	s.mu.Lock()
 	s.cleanupLocked(now)
-	var excludedAuthID string
+	var excludedAuthKey string
 	if sessionID != "" {
 		if isMixedProvider {
 			if auth, excluded := s.resolveMixedBindingLocked(sessionID, available, now); auth != nil {
@@ -176,16 +177,19 @@ func (s *SessionSelector) Pick(ctx context.Context, provider, model string, opts
 				s.mu.Unlock()
 				return auth, nil
 			} else {
-				excludedAuthID = excluded
+				excludedAuthKey = excluded
 			}
 		} else if s.isProviderEnabled(provider) {
 			key := s.sessionKey(provider, sessionID)
 			if binding := s.sessions[key]; binding != nil {
+				bindingKey := sessionBindingKey(binding)
 				if binding.lastUsed.Add(s.cfg.TTL).After(now) && binding.cooldownUntil.After(now) {
-					excludedAuthID = binding.authID
+					excludedAuthKey = bindingKey
 				} else if binding.lastUsed.Add(s.cfg.TTL).After(now) {
-					if auth := findAuthByID(available, binding.authID); auth != nil {
+					if auth := findAuthByKey(available, bindingKey); auth != nil {
 						binding.lastUsed = now
+						binding.authKey = authBindingKey(auth)
+						binding.authID = auth.ID
 						s.trackPendingRequestLocked(auth.ID, now)
 						s.mu.Unlock()
 						return auth, nil
@@ -197,7 +201,7 @@ func (s *SessionSelector) Pick(ctx context.Context, provider, model string, opts
 		}
 	}
 
-	candidates := filterAuthsByID(available, excludedAuthID)
+	candidates := filterAuthsByKey(available, excludedAuthKey)
 	if len(candidates) == 0 {
 		candidates = available
 	}
@@ -211,6 +215,7 @@ func (s *SessionSelector) Pick(ctx context.Context, provider, model string, opts
 		if s.isProviderEnabled(bindingProvider) {
 			key := s.sessionKey(bindingProvider, sessionID)
 			s.sessions[key] = &sessionBinding{
+				authKey:  authBindingKey(selected),
 				authID:   selected.ID,
 				lastUsed: now,
 			}
@@ -311,13 +316,13 @@ func (s *SessionSelector) resolveMixedBindingLocked(sessionID string, available 
 		return nil, ""
 	}
 
-	availableByID := make(map[string]*Auth, len(available))
+	availableByKey := make(map[string]*Auth, len(available))
 	providerSet := make(map[string]struct{}, len(available))
 	for _, auth := range available {
-		if auth == nil || auth.ID == "" {
+		if auth == nil || authBindingKey(auth) == "" {
 			continue
 		}
-		availableByID[auth.ID] = auth
+		availableByKey[authBindingKey(auth)] = auth
 		providerKey := strings.TrimSpace(strings.ToLower(auth.Provider))
 		if providerKey == "" {
 			continue
@@ -326,11 +331,11 @@ func (s *SessionSelector) resolveMixedBindingLocked(sessionID string, available 
 	}
 
 	var (
-		stickyAuth     *Auth
-		stickyBinding  *sessionBinding
-		stickyLastUsed time.Time
-		excludedAuthID string
-		excludedUsed   time.Time
+		stickyAuth      *Auth
+		stickyBinding   *sessionBinding
+		stickyLastUsed  time.Time
+		excludedAuthKey string
+		excludedUsed    time.Time
 	)
 
 	for providerKey := range providerSet {
@@ -346,13 +351,13 @@ func (s *SessionSelector) resolveMixedBindingLocked(sessionID string, available 
 			delete(s.sessions, key)
 			continue
 		}
-		auth := availableByID[binding.authID]
+		auth := availableByKey[sessionBindingKey(binding)]
 		if auth == nil {
 			continue
 		}
 		if binding.cooldownUntil.After(now) {
-			if excludedAuthID == "" || binding.lastUsed.After(excludedUsed) {
-				excludedAuthID = binding.authID
+			if excludedAuthKey == "" || binding.lastUsed.After(excludedUsed) {
+				excludedAuthKey = sessionBindingKey(binding)
 				excludedUsed = binding.lastUsed
 			}
 			continue
@@ -366,9 +371,10 @@ func (s *SessionSelector) resolveMixedBindingLocked(sessionID string, available 
 
 	if stickyAuth != nil && stickyBinding != nil {
 		stickyBinding.lastUsed = now
+		stickyBinding.authID = stickyAuth.ID
 		return stickyAuth, ""
 	}
-	return nil, excludedAuthID
+	return nil, excludedAuthKey
 }
 
 func (s *SessionSelector) trackPendingRequestLocked(authID string, now time.Time) {
@@ -598,25 +604,46 @@ func extractSessionIDFromOriginalRequest(rawJSON []byte) string {
 	return ""
 }
 
-func findAuthByID(auths []*Auth, id string) *Auth {
-	if id == "" {
+func authBindingKey(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if index := strings.TrimSpace(auth.EnsureIndex()); index != "" {
+		return index
+	}
+	return strings.TrimSpace(auth.ID)
+}
+
+func sessionBindingKey(binding *sessionBinding) string {
+	if binding == nil {
+		return ""
+	}
+	if key := strings.TrimSpace(binding.authKey); key != "" {
+		return key
+	}
+	return strings.TrimSpace(binding.authID)
+}
+
+func findAuthByKey(auths []*Auth, key string) *Auth {
+	key = strings.TrimSpace(key)
+	if key == "" {
 		return nil
 	}
 	for _, auth := range auths {
-		if auth != nil && auth.ID == id {
+		if auth != nil && authBindingKey(auth) == key {
 			return auth
 		}
 	}
 	return nil
 }
 
-func filterAuthsByID(auths []*Auth, excludedID string) []*Auth {
-	if excludedID == "" {
+func filterAuthsByKey(auths []*Auth, excludedKey string) []*Auth {
+	if excludedKey == "" {
 		return auths
 	}
 	filtered := make([]*Auth, 0, len(auths))
 	for _, auth := range auths {
-		if auth == nil || auth.ID == excludedID {
+		if auth == nil || authBindingKey(auth) == excludedKey {
 			continue
 		}
 		filtered = append(filtered, auth)

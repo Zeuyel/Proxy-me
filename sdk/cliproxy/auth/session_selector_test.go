@@ -129,3 +129,78 @@ func TestSessionSelectorPick_UsesOriginalRequestPromptCacheKeyWhenMetadataMissin
 		t.Fatalf("expected binding for prompt_cache_key extracted from OriginalRequest")
 	}
 }
+
+func TestSessionSelectorPick_BindsToAuthFileAcrossAuthIDRefresh(t *testing.T) {
+	selector := NewSessionSelector(SessionSelectorConfig{
+		Enabled:          true,
+		Providers:        []string{"codex"},
+		TTL:              5 * time.Minute,
+		FailureThreshold: 1,
+		Cooldown:         5 * time.Minute,
+		LoadWindow:       0,
+	})
+	firstAuth := &Auth{ID: "runtime-id-1", FileName: "codex-account.json", Provider: "codex", Status: StatusActive}
+	otherAuth := &Auth{ID: "z-other", FileName: "other.json", Provider: "codex", Status: StatusActive}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.SessionIDMetadataKey: "session-file-binding"}}
+
+	selected, err := selector.Pick(context.Background(), "codex", "test-model", opts, []*Auth{firstAuth, otherAuth})
+	if err != nil {
+		t.Fatalf("initial Pick() error = %v", err)
+	}
+	if selected != firstAuth {
+		t.Fatalf("initial Pick() selected = %v, want file-backed auth", selected)
+	}
+
+	refreshedAuth := &Auth{ID: "runtime-id-2", FileName: "codex-account.json", Provider: "codex", Status: StatusActive}
+	selected, err = selector.Pick(context.Background(), "codex", "test-model", opts, []*Auth{refreshedAuth, otherAuth})
+	if err != nil {
+		t.Fatalf("refreshed Pick() error = %v", err)
+	}
+	if selected != refreshedAuth {
+		t.Fatalf("refreshed Pick() selected = %v, want same auth file", selected)
+	}
+}
+
+func TestSessionSelectorPick_FailsOverFromUnavailableFileBinding(t *testing.T) {
+	selector := NewSessionSelector(SessionSelectorConfig{
+		Enabled:          true,
+		Providers:        []string{"codex"},
+		TTL:              5 * time.Minute,
+		FailureThreshold: 1,
+		Cooldown:         5 * time.Minute,
+		LoadWindow:       0,
+	})
+	authA := &Auth{ID: "auth-a", FileName: "a.json", Provider: "codex", Status: StatusActive}
+	authB := &Auth{ID: "auth-b", FileName: "b.json", Provider: "codex", Status: StatusActive}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.SessionIDMetadataKey: "session-failover"}}
+
+	first, err := selector.Pick(context.Background(), "codex", "test-model", opts, []*Auth{authA, authB})
+	if err != nil {
+		t.Fatalf("initial Pick() error = %v", err)
+	}
+	if first != authA {
+		t.Fatalf("initial Pick() selected = %v, want auth-a", first)
+	}
+
+	ctx := WithSessionID(context.Background(), "session-failover")
+	selector.RecordResult(ctx, Result{AuthID: authA.ID, Provider: "codex", Model: "test-model", Success: false, Error: &Error{HTTPStatus: 429}})
+	authA.Unavailable = true
+	authA.NextRetryAfter = time.Now().Add(time.Hour)
+	second, err := selector.Pick(context.Background(), "codex", "test-model", opts, []*Auth{authA, authB})
+	if err != nil {
+		t.Fatalf("failover Pick() error = %v", err)
+	}
+	if second != authB {
+		t.Fatalf("failover Pick() selected = %v, want auth-b", second)
+	}
+
+	authA.Unavailable = false
+	authA.NextRetryAfter = time.Time{}
+	third, err := selector.Pick(context.Background(), "codex", "test-model", opts, []*Auth{authA, authB})
+	if err != nil {
+		t.Fatalf("sticky fallback Pick() error = %v", err)
+	}
+	if third != authB {
+		t.Fatalf("sticky fallback Pick() selected = %v, want auth-b", third)
+	}
+}

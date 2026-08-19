@@ -25,9 +25,10 @@ type codexThreadIsolationState struct {
 }
 
 type codexResponseBinding struct {
-	rawID     string
-	authScope string
-	expires   time.Time
+	rawID                   string
+	authScope               string
+	canonicalPromptCacheKey string
+	expires                 time.Time
 }
 
 var codexResponseBindings = struct {
@@ -41,12 +42,27 @@ func newCodexThreadIsolationState(auth *cliproxyauth.Auth, model, clientPromptCa
 	if scope == "" || clientPromptCacheKey == "" {
 		return codexThreadIsolationState{}
 	}
+	return newCodexThreadIsolationStateWithCanonical(auth, model, clientPromptCacheKey, opts, scope, "")
+}
+
+func newCodexThreadIsolationStateWithCanonical(auth *cliproxyauth.Auth, model, clientPromptCacheKey string, opts cliproxyexecutor.Options, scope, canonical string) codexThreadIsolationState {
+	clientPromptCacheKey = strings.TrimSpace(clientPromptCacheKey)
+	if strings.TrimSpace(scope) == "" {
+		return codexThreadIsolationState{}
+	}
+	canonical = strings.TrimSpace(canonical)
+	if clientPromptCacheKey == "" && canonical == "" {
+		return codexThreadIsolationState{}
+	}
+	if canonical == "" {
+		canonical = codexCanonicalThreadID(scope, clientPromptCacheKey)
+	}
 	return codexThreadIsolationState{
 		enabled:                 true,
 		authScope:               scope,
 		model:                   strings.TrimSpace(model),
 		clientPromptCacheKey:    clientPromptCacheKey,
-		canonicalPromptCacheKey: codexCanonicalThreadID(scope, clientPromptCacheKey),
+		canonicalPromptCacheKey: canonical,
 	}
 }
 
@@ -54,11 +70,9 @@ func codexAuthScope(auth *cliproxyauth.Auth, model, clientTenant string) string 
 	if auth == nil {
 		return ""
 	}
-	authID := strings.TrimSpace(auth.ID)
 	authIndex := strings.TrimSpace(auth.EnsureIndex())
 	accountID := strings.TrimSpace(resolveCodexAccountID(auth))
-	fileName := strings.TrimSpace(auth.FileName)
-	if authID == "" && authIndex == "" && accountID == "" && fileName == "" {
+	if authIndex == "" && accountID == "" && strings.TrimSpace(auth.ID) == "" {
 		return ""
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
@@ -67,14 +81,18 @@ func codexAuthScope(auth *cliproxyauth.Auth, model, clientTenant string) string 
 	if clientTenant != "" {
 		clientTenant = uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex-tenant:\x00"+clientTenant)).String()
 	}
+	authKey := authIndex
+	if authKey == "" {
+		authKey = accountID
+	}
+	if authKey == "" {
+		authKey = strings.TrimSpace(auth.ID)
+	}
 	return strings.Join([]string{
 		"provider=" + provider,
 		"model=" + model,
-		"tenant=" + accountID,
+		"auth=" + authKey,
 		"client=" + clientTenant,
-		"auth_id=" + authID,
-		"auth_index=" + authIndex,
-		"file=" + fileName,
 	}, "\x00")
 }
 
@@ -191,14 +209,40 @@ func resolveCodexPreviousResponseID(value, authScope string) string {
 	if value == "" || authScope == "" {
 		return value
 	}
-	now := time.Now()
-	codexResponseBindings.RLock()
-	binding, ok := codexResponseBindings.byID[value]
-	codexResponseBindings.RUnlock()
-	if !ok || binding.expires.Before(now) || binding.authScope != authScope {
+	binding, ok := resolveCodexResponseBinding(value, authScope)
+	if !ok {
 		return ""
 	}
 	return binding.rawID
+}
+
+func resolveCodexResponseBinding(value, authScope string) (codexResponseBinding, bool) {
+	value = strings.TrimSpace(value)
+	authScope = strings.TrimSpace(authScope)
+	if value == "" || authScope == "" {
+		return codexResponseBinding{}, false
+	}
+	now := time.Now()
+	candidates := []string{value}
+	if strings.HasPrefix(value, codexConversationPrefix) {
+		if alias := strings.TrimPrefix(value, codexConversationPrefix); alias != "" {
+			candidates = append(candidates, alias)
+		}
+	}
+	codexResponseBindings.RLock()
+	var binding codexResponseBinding
+	var ok bool
+	for _, candidate := range candidates {
+		binding, ok = codexResponseBindings.byID[candidate]
+		if ok {
+			break
+		}
+	}
+	codexResponseBindings.RUnlock()
+	if !ok || binding.expires.Before(now) || binding.authScope != authScope {
+		return codexResponseBinding{}, false
+	}
+	return binding, true
 }
 
 func registerCodexResponseIDs(payload []byte, state codexThreadIsolationState) {
@@ -208,7 +252,7 @@ func registerCodexResponseIDs(payload []byte, state codexThreadIsolationState) {
 	now := time.Now()
 	for _, rawID := range codexResponseIDs(payload) {
 		alias := codexResponseAlias(state.authScope, rawID)
-		binding := codexResponseBinding{rawID: rawID, authScope: state.authScope, expires: now.Add(codexThreadIdentityTTL)}
+		binding := codexResponseBinding{rawID: rawID, authScope: state.authScope, canonicalPromptCacheKey: state.canonicalPromptCacheKey, expires: now.Add(codexThreadIdentityTTL)}
 		codexResponseBindings.Lock()
 		for key, existing := range codexResponseBindings.byID {
 			if existing.expires.Before(now) {
@@ -255,7 +299,18 @@ func applyCodexThreadIsolationExposeResponsePayload(payload []byte, state codexT
 	for _, rawID := range codexResponseIDs(payload) {
 		payload = replaceCodexIdentityResponsePayload(payload, rawID, codexResponseAlias(state.authScope, rawID))
 	}
+	if state.clientPromptCacheKey == "" {
+		return redactCodexIdentityResponsePayload(payload, state.canonicalPromptCacheKey)
+	}
 	return replaceCodexIdentityResponsePayload(payload, state.canonicalPromptCacheKey, state.clientPromptCacheKey)
+}
+
+func redactCodexIdentityResponsePayload(payload []byte, value string) []byte {
+	value = strings.TrimSpace(value)
+	if len(payload) == 0 || value == "" || !bytes.Contains(payload, []byte(value)) {
+		return payload
+	}
+	return bytes.ReplaceAll(payload, []byte(value), nil)
 }
 
 func applyCodexClientResponsePayload(payload []byte, identityState codexIdentityConfuseState) []byte {

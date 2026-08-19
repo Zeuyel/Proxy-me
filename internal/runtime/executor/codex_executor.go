@@ -1162,7 +1162,15 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 		cache.ID = extractCodexConversationIDForRequest(req, opts, rawJSON)
 	}
 
-	threadIsolation := newCodexThreadIsolationState(auth, req.Model, cache.ID, opts)
+	threadScope := codexAuthScope(auth, req.Model, codexClientTenant(opts))
+	canonicalThreadID := ""
+	if threadScope != "" && cache.ID != "" {
+		if binding, ok := resolveCodexResponseBinding(cache.ID, threadScope); ok {
+			canonicalThreadID = binding.canonicalPromptCacheKey
+			cache.ID = ""
+		}
+	}
+	threadIsolation := newCodexThreadIsolationStateWithCanonical(auth, req.Model, cache.ID, opts, threadScope, canonicalThreadID)
 	if threadIsolation.enabled {
 		rawJSON = applyCodexThreadIsolationBody(rawJSON, threadIsolation)
 		cache.ID = threadIsolation.canonicalPromptCacheKey
