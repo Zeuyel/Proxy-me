@@ -27,6 +27,7 @@ import {
   IconSlidersHorizontal,
   IconActivity,
   IconSatellite,
+  IconClipboard,
 } from '@/components/ui/icons';
 import { INLINE_LOGO_JPEG } from '@/assets/logoInline';
 import {
@@ -52,6 +53,7 @@ const sidebarIcons: Record<string, ReactNode> = {
   system: <IconInfo size={18} />,
   monitor: <IconActivity size={18} />,
   reverseProxies: <IconSatellite size={18} />,
+  quotaAudit: <IconClipboard size={18} />,
 };
 
 // Header action icons - smaller size for header buttons
@@ -365,6 +367,7 @@ export function MainLayout() {
     { path: '/auth-files', label: t('nav.auth_files'), icon: sidebarIcons.authFiles },
     { path: '/oauth', label: t('nav.oauth', { defaultValue: 'OAuth' }), icon: sidebarIcons.oauth },
     { path: '/usage', label: t('nav.usage_stats'), icon: sidebarIcons.usage },
+    { path: '/quota-audit', label: t('nav.quota_audit'), icon: sidebarIcons.quotaAudit },
     { path: '/config', label: t('nav.config_management'), icon: sidebarIcons.config },
     ...(config?.loggingToFile
       ? [{ path: '/logs', label: t('nav.logs'), icon: sidebarIcons.logs }]

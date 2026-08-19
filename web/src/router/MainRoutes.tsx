@@ -11,6 +11,7 @@ import { LogsPage } from '@/pages/LogsPage';
 import { SystemPage } from '@/pages/SystemPage';
 import { ReverseProxiesPage } from '@/pages/ReverseProxiesPage';
 import { MonitorPage } from '@/pages/MonitorPage';
+import { QuotaAuditPage } from '@/pages/QuotaAuditPage';
 
 const mainRoutes = [
   { path: '/', element: <DashboardPage /> },
@@ -21,6 +22,7 @@ const mainRoutes = [
   { path: '/auth-files', element: <AuthFilesPage /> },
   { path: '/oauth', element: <OAuthPage /> },
   { path: '/usage', element: <UsagePage /> },
+  { path: '/quota-audit', element: <QuotaAuditPage /> },
   { path: '/config', element: <ConfigPage /> },
   { path: '/logs', element: <LogsPage /> },
   { path: '/system', element: <SystemPage /> },

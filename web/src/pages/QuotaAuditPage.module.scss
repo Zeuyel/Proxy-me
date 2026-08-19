@@ -1,0 +1,389 @@
+@use '../styles/variables' as *;
+@use '../styles/mixins' as *;
+
+.container {
+  width: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  position: relative;
+  padding: 0 6px 6px 0;
+}
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.pageTitle {
+  color: var(--text-primary);
+  font-size: 28px;
+  font-weight: 800;
+  margin: 0;
+
+  @include mobile {
+    font-size: 22px;
+  }
+}
+
+.pageSubtitle {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin: 6px 0 0;
+}
+
+.loadingOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12px;
+  pointer-events: none;
+}
+
+.loadingOverlayContent {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 14px;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  border: 2px solid var(--border-color);
+  box-shadow: var(--brutal-shadow);
+  font-size: 12px;
+}
+
+.filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px;
+  background: var(--bg-secondary);
+  border: 2px solid var(--border-color);
+}
+
+.filterField {
+  display: flex;
+  flex: 1 1 150px;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 140px;
+
+  span {
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  select,
+  input {
+    min-height: 35px;
+    width: 100%;
+    padding: 7px 9px;
+    color: var(--text-primary);
+    background: var(--bg-primary);
+    border: 2px solid var(--border-color);
+    border-radius: 0;
+    font: inherit;
+    font-size: 12px;
+  }
+
+  select:focus,
+  input:focus {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+.filterActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 35px;
+}
+
+.errorBox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px;
+  color: var(--error-color);
+  background: rgba(239, 68, 68, 0.09);
+  border: 2px solid var(--error-color);
+  font-size: 12px;
+
+  strong {
+    font-weight: 800;
+  }
+
+  span {
+    flex: 1 1 260px;
+  }
+}
+
+.summaryGrid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+
+  @include tablet {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  @include mobile {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.summaryCard {
+  display: flex;
+  min-height: 122px;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  background: var(--bg-primary);
+  border: 2px solid var(--border-color);
+  box-shadow: var(--brutal-shadow);
+
+  strong {
+    color: var(--text-primary);
+    font-size: 24px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+  }
+
+  small {
+    margin-top: auto;
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+}
+
+.summaryLabel {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.priceNotice {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  padding: 10px 12px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-left: 4px solid var(--primary-color);
+  font-size: 12px;
+
+  strong {
+    color: var(--text-primary);
+  }
+}
+
+.chartGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+
+  @include mobile {
+    grid-template-columns: 1fr;
+  }
+}
+
+.chartCard,
+.tableCard {
+  min-width: 0;
+  padding: 14px;
+  background: var(--bg-primary);
+  border: 2px solid var(--border-color);
+  box-shadow: var(--brutal-shadow);
+}
+
+.cardHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+
+  h2 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 15px;
+    font-weight: 800;
+  }
+
+  span {
+    color: var(--text-tertiary);
+    font-size: 11px;
+    text-align: right;
+  }
+}
+
+.chartCanvas {
+  height: 280px;
+  position: relative;
+
+  @include mobile {
+    height: 240px;
+  }
+}
+
+.chartEmpty {
+  display: grid;
+  height: 100%;
+  margin: 0;
+  place-items: center;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.tableCard {
+  padding-bottom: 0;
+}
+
+.tableScroller {
+  overflow-x: auto;
+  margin: 0 -14px;
+}
+
+table {
+  width: 100%;
+  min-width: 1180px;
+  border-collapse: collapse;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+th,
+td {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-color);
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+th {
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+td {
+  font-variant-numeric: tabular-nums;
+}
+
+td strong,
+td small {
+  display: block;
+}
+
+td small {
+  margin-top: 3px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  white-space: normal;
+}
+
+tbody tr:hover {
+  background: var(--bg-secondary);
+}
+
+.tokenBreakdown {
+  display: grid;
+  min-width: 178px;
+  gap: 2px;
+  color: var(--text-secondary);
+  font-size: 10px;
+
+  b {
+    color: var(--text-primary);
+  }
+}
+
+.negativeValue {
+  color: var(--error-color);
+  font-weight: 800;
+}
+
+.statusBadge {
+  display: inline-flex;
+  padding: 3px 7px;
+  border: 1px solid currentColor;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.status-ok {
+  color: var(--success-color);
+}
+
+.status-warning {
+  color: var(--warning-color);
+}
+
+.status-reset {
+  color: var(--primary-color);
+}
+
+.status-unknown,
+.status-stale {
+  color: var(--text-tertiary);
+}
+
+.status-negative {
+  color: var(--error-color);
+}
+
+.statusReason {
+  max-width: 180px;
+}
+
+@include mobile {
+  .filters {
+    align-items: stretch;
+  }
+
+  .filterField {
+    flex-basis: calc(50% - 6px);
+    min-width: 0;
+  }
+
+  .filterActions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .summaryCard {
+    min-height: 112px;
+    padding: 11px;
+
+    strong {
+      font-size: 19px;
+    }
+  }
+
+  .cardHeader {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+
+    span {
+      text-align: left;
+    }
+  }
+}
