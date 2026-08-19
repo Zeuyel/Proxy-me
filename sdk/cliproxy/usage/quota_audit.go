@@ -144,11 +144,12 @@ type QuotaAuditStore struct {
 	snapshots    []QuotaWindowSnapshot
 	usage        []QuotaAuditUsage
 	prices       map[string]PriceSnapshot
+	manualPrices map[string]struct{}
 	nextSequence int64
 }
 
 func NewQuotaAuditStore() *QuotaAuditStore {
-	return &QuotaAuditStore{prices: make(map[string]PriceSnapshot)}
+	return &QuotaAuditStore{prices: make(map[string]PriceSnapshot), manualPrices: make(map[string]struct{})}
 }
 
 var defaultQuotaAuditStore = NewQuotaAuditStore()
@@ -165,15 +166,28 @@ func SetPriceSnapshot(model string, snapshot PriceSnapshot) {
 	defaultQuotaAuditStore.SetPriceSnapshot(model, snapshot)
 }
 
+// SetManualPriceSnapshot stores a price that remote synchronization must not replace.
+func SetManualPriceSnapshot(model string, snapshot PriceSnapshot) {
+	defaultQuotaAuditStore.SetManualPriceSnapshot(model, snapshot)
+}
+
 func BuildQuotaAudit(query QuotaAuditQuery) QuotaAuditResponse {
 	return defaultQuotaAuditStore.Build(query, time.Now().UTC())
 }
 
 func (s *QuotaAuditStore) SetPriceSnapshot(model string, snapshot PriceSnapshot) {
+	s.setPriceSnapshot(model, snapshot)
+}
+
+func (s *QuotaAuditStore) SetManualPriceSnapshot(model string, snapshot PriceSnapshot) {
+	s.setPriceSnapshot(model, snapshot)
+}
+
+func (s *QuotaAuditStore) setPriceSnapshot(model string, snapshot PriceSnapshot) {
 	if s == nil {
 		return
 	}
-	model = strings.TrimSpace(model)
+	model = normalizeQuotaAuditModel(model)
 	if model == "" {
 		return
 	}
@@ -190,8 +204,62 @@ func (s *QuotaAuditStore) SetPriceSnapshot(model string, snapshot PriceSnapshot)
 	if s.prices == nil {
 		s.prices = make(map[string]PriceSnapshot)
 	}
+	if s.manualPrices == nil {
+		s.manualPrices = make(map[string]struct{})
+	}
 	s.prices[model] = snapshot
+	s.manualPrices[model] = struct{}{}
 	s.mu.Unlock()
+}
+
+// SetSyncedPriceSnapshot stores a remotely sourced price unless a manual price exists.
+// It returns false when a manual price already owns the model entry.
+func (s *QuotaAuditStore) SetSyncedPriceSnapshot(model string, snapshot PriceSnapshot) bool {
+	if s == nil {
+		return false
+	}
+	model = normalizeQuotaAuditModel(model)
+	if model == "" {
+		return false
+	}
+	for _, rate := range []*float64{snapshot.InputPerMillionUSD, snapshot.OutputPerMillionUSD, snapshot.ReasoningPerMillionUSD, snapshot.CachedPerMillionUSD} {
+		if rate != nil && (math.IsNaN(*rate) || math.IsInf(*rate, 0) || *rate < 0) {
+			return false
+		}
+	}
+	if snapshot.CapturedAt.IsZero() {
+		snapshot.CapturedAt = time.Now().UTC()
+	}
+	snapshot = clonePriceSnapshot(snapshot)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.prices == nil {
+		s.prices = make(map[string]PriceSnapshot)
+	}
+	if s.manualPrices == nil {
+		s.manualPrices = make(map[string]struct{})
+	}
+	if _, manual := s.manualPrices[model]; manual {
+		return false
+	}
+	s.prices[model] = snapshot
+	return true
+}
+
+func (s *QuotaAuditStore) priceSnapshot(model string) (PriceSnapshot, bool, bool) {
+	if s == nil {
+		return PriceSnapshot{}, false, false
+	}
+	model = normalizeQuotaAuditModel(model)
+	s.mu.RLock()
+	price, ok := s.prices[model]
+	_, manual := s.manualPrices[model]
+	s.mu.RUnlock()
+	return clonePriceSnapshot(price), ok, manual
+}
+
+func normalizeQuotaAuditModel(model string) string {
+	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(model)), " "))
 }
 
 func (s *QuotaAuditStore) CaptureUsage(record Record) {
@@ -217,7 +285,7 @@ func (s *QuotaAuditStore) CaptureUsage(record Record) {
 		}
 	}
 	s.mu.Lock()
-	if price, ok := s.prices[strings.TrimSpace(record.Model)]; ok {
+	if price, ok := s.prices[normalizeQuotaAuditModel(record.Model)]; ok {
 		priceCopy := clonePriceSnapshot(price)
 		item.PriceSnapshot = &priceCopy
 		tokens := QuotaAuditTokens{Input: item.InputTokens, Output: item.OutputTokens, Reasoning: item.ReasoningTokens, Cached: item.CachedTokens, Total: item.TotalTokens}
@@ -294,9 +362,14 @@ func (s *QuotaAuditStore) Merge(export QuotaAuditExport) (addedSnapshots, addedU
 	if s.prices == nil {
 		s.prices = make(map[string]PriceSnapshot)
 	}
+	if s.manualPrices == nil {
+		s.manualPrices = make(map[string]struct{})
+	}
 	for model, price := range export.PriceSnapshots {
+		model = normalizeQuotaAuditModel(model)
 		if _, exists := s.prices[model]; !exists {
 			s.prices[model] = clonePriceSnapshot(price)
+			s.manualPrices[model] = struct{}{}
 		}
 	}
 	for _, snapshot := range export.Snapshots {
@@ -374,7 +447,7 @@ func (s *QuotaAuditStore) Build(query QuotaAuditQuery, now time.Time) QuotaAudit
 	query.Auth = strings.TrimSpace(query.Auth)
 	query.Account = strings.TrimSpace(query.Account)
 	query.Window = strings.TrimSpace(query.Window)
-	query.Model = strings.TrimSpace(query.Model)
+	query.Model = normalizeQuotaAuditModel(query.Model)
 	s.mu.RLock()
 	snapshots := append([]QuotaWindowSnapshot(nil), s.snapshots...)
 	usage := append([]QuotaAuditUsage(nil), s.usage...)
@@ -616,7 +689,7 @@ func matchingUsage(snapshot QuotaWindowSnapshot, usage []QuotaAuditUsage, start 
 		if item.Timestamp.After(snapshot.ObservedAt) {
 			continue
 		}
-		if modelFilter != "" && item.Model != modelFilter {
+		if modelFilter != "" && normalizeQuotaAuditModel(item.Model) != modelFilter {
 			continue
 		}
 		result = append(result, item)

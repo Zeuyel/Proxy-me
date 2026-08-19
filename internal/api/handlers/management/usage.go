@@ -113,6 +113,29 @@ func (h *Handler) GetQuotaAudit(c *gin.Context) {
 	c.JSON(http.StatusOK, coreusage.BuildQuotaAudit(query))
 }
 
+// SyncQuotaAuditPrices refreshes prices from the validated CCH Plus CPT v1 feed.
+func (h *Handler) SyncQuotaAuditPrices(c *gin.Context) {
+	if h == nil || h.priceSync == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "price synchronization unavailable", "failed": 1})
+		return
+	}
+	result, err := h.priceSync.Sync(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":       err.Error(),
+			"source":      result.Source,
+			"version":     result.Version,
+			"fingerprint": result.Fingerprint,
+			"etag":        result.ETag,
+			"updated":     result.Updated,
+			"unchanged":   result.Unchanged,
+			"failed":      result.Failed,
+		})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
 // PutQuotaAuditPrice stores an immutable server-side price input for a model.
 func (h *Handler) PutQuotaAuditPrice(c *gin.Context) {
 	var payload struct {
@@ -162,7 +185,7 @@ func (h *Handler) PutQuotaAuditPrice(c *gin.Context) {
 	}
 	payload.PriceSnapshot.Fingerprint = computedFingerprint
 	payload.PriceSnapshot.Immutable = true
-	coreusage.SetPriceSnapshot(payload.Model, payload.PriceSnapshot)
+	coreusage.SetManualPriceSnapshot(payload.Model, payload.PriceSnapshot)
 	c.JSON(http.StatusOK, gin.H{"model": payload.Model, "price_snapshot": payload.PriceSnapshot})
 }
 

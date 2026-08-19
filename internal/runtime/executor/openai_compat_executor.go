@@ -17,6 +17,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -41,16 +42,18 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	if req == nil {
 		return nil
 	}
+	sanitizeOpenAICompatHeaders(req.Header)
 	_, apiKey := e.resolveCredentials(auth)
-	if strings.TrimSpace(apiKey) != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	applyReverseProxyHeaders(req, e.cfg, auth, e.Identifier())
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	if strings.TrimSpace(apiKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	req.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	applyReverseProxyHeaders(req, e.cfg, auth, e.Identifier())
 	return nil
 }
 
@@ -107,6 +110,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
+	translated = sanitizeOpenAICompatPayload(translated)
 
 	originalURL := strings.TrimSuffix(baseURL, "/") + endpoint
 	proxyRoute := resolveReverseProxyRouteForAuth(e.cfg, auth, e.Identifier(), originalURL)
@@ -116,16 +120,16 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
 	applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -167,12 +171,12 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 				return resp, err
 			}
 			httpReq.Header.Set("Content-Type", "application/json")
+			applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
+			util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 			if apiKey != "" {
 				httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 			}
 			httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
-			applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
-			util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 			recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
 				URL:       fallbackURL,
 				Method:    http.MethodPost,
@@ -256,6 +260,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if err != nil {
 		return nil, err
 	}
+	translated = sanitizeOpenAICompatPayload(translated)
 
 	originalURL := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	proxyRoute := resolveReverseProxyRouteForAuth(e.cfg, auth, e.Identifier(), originalURL)
@@ -265,16 +270,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
 	applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string
@@ -318,12 +323,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				return nil, err
 			}
 			httpReq.Header.Set("Content-Type", "application/json")
+			applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
+			util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 			if apiKey != "" {
 				httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 			}
 			httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
-			applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
-			util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 			httpReq.Header.Set("Accept", "text/event-stream")
 			httpReq.Header.Set("Cache-Control", "no-cache")
 			recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
@@ -429,6 +434,67 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	usageJSON := buildOpenAIUsageJSON(count)
 	translatedUsage := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
 	return cliproxyexecutor.Response{Payload: []byte(translatedUsage)}, nil
+}
+
+func sanitizeOpenAICompatPayload(rawJSON []byte) []byte {
+	if len(rawJSON) == 0 {
+		return rawJSON
+	}
+	for _, key := range []string{
+		"__cpa_user_agent",
+		"client_metadata",
+		"client_id",
+		"client-id",
+		"client_request_id",
+		"client-request-id",
+		"request_id",
+		"request-id",
+		"session_id",
+		"session-id",
+		"thread_id",
+		"thread-id",
+		"installation_id",
+		"installation-id",
+		"account_id",
+		"account-id",
+		"trace_id",
+		"trace-id",
+		"user_agent",
+		"user-agent",
+	} {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, key)
+	}
+	metadata := gjson.GetBytes(rawJSON, "metadata")
+	if !metadata.IsObject() {
+		return rawJSON
+	}
+	for key := range metadata.Map() {
+		if isClientIdentityMetadataKey(key) {
+			rawJSON, _ = sjson.DeleteBytes(rawJSON, "metadata."+key)
+		}
+	}
+	return rawJSON
+}
+
+func isClientIdentityMetadataKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "account_id", "account-id", "client_id", "client-id", "email", "installation_id", "installation-id", "request_id", "request-id", "session_id", "session-id", "thread_id", "thread-id", "trace_id", "trace-id", "user_id", "user-id", "user_agent", "user-agent":
+		return true
+	default:
+		return false
+	}
+}
+
+func sanitizeOpenAICompatHeaders(headers http.Header) {
+	if headers == nil {
+		return
+	}
+	for key := range headers {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "authorization", "cookie", "proxy-authorization", "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip", "traceparent", "tracestate", "x-request-id", "x-client-request-id", "user-agent":
+			delete(headers, key)
+		}
+	}
 }
 
 // Refresh is a no-op for API-key based compatibility providers.

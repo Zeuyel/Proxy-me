@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -44,6 +45,7 @@ type Handler struct {
 	failedAttempts      map[string]*attemptInfo // keyed by client IP
 	authManager         *coreauth.Manager
 	usageStats          *usage.RequestStatistics
+	priceSync           *coreusage.CCHPriceSync
 	tokenStore          coreauth.Store
 	localPassword       string
 	allowRemoteOverride bool
@@ -66,6 +68,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
+	h.priceSync = coreusage.NewCCHPriceSync(coreusage.DefaultQuotaAuditStore())
 	h.startAttemptCleanup()
 	return h
 }
@@ -113,6 +116,9 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = ma
 
 // SetUsageStatistics allows replacing the usage statistics reference.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
+
+// SetQuotaAuditPriceSync replaces the remote price synchronizer, primarily for tests.
+func (h *Handler) SetQuotaAuditPriceSync(syncer *coreusage.CCHPriceSync) { h.priceSync = syncer }
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }

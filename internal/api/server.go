@@ -499,6 +499,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/quota-audit", s.mgmt.GetQuotaAudit)
 		mgmt.PUT("/usage/quota-audit/prices", s.mgmt.PutQuotaAuditPrice)
+		mgmt.POST("/usage/quota-audit/prices/sync", s.mgmt.SyncQuotaAuditPrices)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/monitor/request-logs", s.mgmt.GetMonitorRequestLogs)

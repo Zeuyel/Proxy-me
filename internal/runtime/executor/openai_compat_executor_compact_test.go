@@ -56,3 +56,23 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 		t.Fatalf("payload = %s", string(resp.Payload))
 	}
 }
+
+func TestSanitizeOpenAICompatPayloadKeepsUserContentAndDropsClientIdentity(t *testing.T) {
+	raw := []byte(`{"model":"gpt-5.1","user":"tenant-user","client_metadata":{"email":"client@example.com"},"metadata":{"trace_id":"trace-123","tenant":"provider-value"},"messages":[{"role":"user","content":"hello","user":"message-content"}]}`)
+	got := sanitizeOpenAICompatPayload(raw)
+	if gjson.GetBytes(got, "user").String() != "tenant-user" {
+		t.Fatalf("top-level user = %q, want preserved provider field", gjson.GetBytes(got, "user").String())
+	}
+	if gjson.GetBytes(got, "messages.0.user").String() != "message-content" {
+		t.Fatalf("message user = %q, want preserved content", gjson.GetBytes(got, "messages.0.user").String())
+	}
+	if gjson.GetBytes(got, "client_metadata").Exists() {
+		t.Fatalf("client_metadata should be removed: %s", got)
+	}
+	if gjson.GetBytes(got, "metadata.trace_id").Exists() {
+		t.Fatalf("metadata.trace_id should be removed: %s", got)
+	}
+	if gjson.GetBytes(got, "metadata.tenant").String() != "provider-value" {
+		t.Fatalf("provider metadata was removed: %s", got)
+	}
+}

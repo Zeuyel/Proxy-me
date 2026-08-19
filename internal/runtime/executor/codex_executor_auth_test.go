@@ -102,7 +102,7 @@ func TestApplyCodexHeadersDoesNotInjectWebHeadersForAPIKey(t *testing.T) {
 	}
 }
 
-func TestApplyCodexHeadersPassesThroughCodexTelemetryHeaders(t *testing.T) {
+func TestApplyCodexHeadersBlocksInboundClientIdentityHeaders(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
@@ -140,21 +140,40 @@ func TestApplyCodexHeadersPassesThroughCodexTelemetryHeaders(t *testing.T) {
 
 	applyCodexHeaders(req, auth, token, true)
 
+	for _, key := range []string{
+		"Traceparent",
+		"Tracestate",
+		"X-Request-ID",
+		"X-Codex-Installation-Id",
+		"X-Codex-Parent-Thread-Id",
+		"X-Codex-Turn-State",
+		"X-Codex-Turn-Metadata",
+		"X-Codex-Beta-Features",
+		"X-Responsesapi-Include-Timing-Metrics",
+		"X-Openai-Subagent",
+		"X-Openai-Internal-Codex-Residency",
+		"Cookie",
+		"X-Forwarded-For",
+		"X-Forwarded-Proto",
+		"X-Forwarded-Host",
+		"X-Real-IP",
+	} {
+		if got := req.Header.Get(key); got != "" {
+			t.Fatalf("%s = %q, want empty", key, got)
+		}
+	}
+	if got := req.Header.Get("User-Agent"); got != defaultCodexUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, defaultCodexUserAgent)
+	}
+	if got := req.Header.Get("X-Client-Request-Id"); got != req.Header.Get("Session_id") {
+		t.Fatalf("X-Client-Request-Id = %q, want generated Session_id %q", got, req.Header.Get("Session_id"))
+	}
+	if got := req.Header.Get("X-Codex-Window-Id"); got != req.Header.Get("Session_id")+":0" {
+		t.Fatalf("X-Codex-Window-Id = %q, want generated session window", got)
+	}
 	for key, want := range map[string]string{
-		"Traceparent":                           "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-		"Tracestate":                            "vendor=value",
-		"X-Codex-Installation-Id":               "install-123",
-		"X-Codex-Window-Id":                     "window-123:0",
-		"X-Codex-Parent-Thread-Id":              "thread-123",
-		"X-Codex-Turn-State":                    "turn-state",
-		"X-Codex-Turn-Metadata":                 "{\"turn_id\":\"t-1\"}",
-		"X-Codex-Beta-Features":                 "beta-a,beta-b",
-		"X-Responsesapi-Include-Timing-Metrics": "true",
-		"X-Openai-Subagent":                     "planner",
-		"X-Openai-Internal-Codex-Residency":     "us",
-		"X-Client-Request-Id":                   "client-123",
-		"Origin":                                codexWebOrigin,
-		"Referer":                               codexCodexReferer,
+		"Origin":  codexWebOrigin,
+		"Referer": codexCodexReferer,
 	} {
 		if got := req.Header.Get(key); got != want {
 			t.Fatalf("%s = %q, want %q", key, got, want)
@@ -194,7 +213,7 @@ func TestCodexCacheHelperUsesOriginalPreviousResponseIDForConversationHeaders(t 
 	}
 }
 
-func TestCodexExecutePreservesPreviousResponseIDForUpstreamRequest(t *testing.T) {
+func TestCodexExecuteRejectsUnownedPreviousResponseID(t *testing.T) {
 	var gotBody []byte
 	var gotSessionID string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -229,15 +248,14 @@ func TestCodexExecutePreservesPreviousResponseIDForUpstreamRequest(t *testing.T)
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	wantConversationID := codexConversationPrefix + "resp_12345678901234567890"
-	if got := gjson.GetBytes(gotBody, "previous_response_id").String(); got != "resp_12345678901234567890" {
-		t.Fatalf("upstream previous_response_id = %q, want preserved value", got)
+	if gjson.GetBytes(gotBody, "previous_response_id").Exists() {
+		t.Fatalf("unowned previous_response_id was forwarded: %s", gotBody)
 	}
-	if got := gjson.GetBytes(gotBody, "prompt_cache_key").String(); got != wantConversationID {
-		t.Fatalf("upstream prompt_cache_key = %q, want %q", got, wantConversationID)
+	if got := gjson.GetBytes(gotBody, "prompt_cache_key").String(); got == "" || got == codexConversationPrefix+"resp_12345678901234567890" {
+		t.Fatalf("upstream prompt_cache_key was not account-scoped: %q", got)
 	}
-	if gotSessionID != wantConversationID {
-		t.Fatalf("upstream Session_id = %q, want %q", gotSessionID, wantConversationID)
+	if gotSessionID == "" {
+		t.Fatal("upstream Session_id should still be generated for a threadless request")
 	}
 }
 
@@ -368,12 +386,13 @@ func TestCodexExecuteInjectsClientMetadataInstallationID(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	if got := gjson.GetBytes(gotBody, "client_metadata.x-codex-installation-id").String(); got != "install-123" {
-		t.Fatalf("client_metadata.x-codex-installation-id = %q, want %q; body=%s", got, "install-123", gotBody)
+	wantInstallationID := resolveCodexInstallationID(auth)
+	if got := gjson.GetBytes(gotBody, "client_metadata.x-codex-installation-id").String(); got != wantInstallationID {
+		t.Fatalf("client_metadata.x-codex-installation-id = %q, want auth-derived %q; body=%s", got, wantInstallationID, gotBody)
 	}
 }
 
-func TestApplyCodexHeadersSynthesizesWindowIDFromSessionID(t *testing.T) {
+func TestApplyCodexHeadersRebuildsSessionAndWindowIdentity(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
@@ -382,8 +401,11 @@ func TestApplyCodexHeadersSynthesizesWindowIDFromSessionID(t *testing.T) {
 
 	applyCodexHeaders(req, &cliproxyauth.Auth{Provider: "codex"}, "token", true)
 
-	if got := req.Header.Get("X-Codex-Window-Id"); got != "codex_prev_12345678901234567890:0" {
-		t.Fatalf("X-Codex-Window-Id = %q, want derived session window", got)
+	if got := req.Header.Get("Session_id"); got == "codex_prev_12345678901234567890" || got == "" {
+		t.Fatalf("Session_id = %q, want rebuilt session", got)
+	}
+	if got := req.Header.Get("X-Codex-Window-Id"); got != req.Header.Get("Session_id")+":0" {
+		t.Fatalf("X-Codex-Window-Id = %q, want rebuilt session window", got)
 	}
 }
 
@@ -398,7 +420,7 @@ func TestInjectCodexClientMetadataFallsBackToDeterministicInstallationID(t *test
 		},
 	}
 
-	gotBody := injectCodexClientMetadata([]byte(`{"model":"gpt-5.5","input":"hi"}`), nil, auth)
+	gotBody := injectCodexClientMetadata([]byte(`{"model":"gpt-5.5","input":"hi"}`), auth)
 	want := resolveCodexInstallationID(auth)
 	if want == "" {
 		t.Fatal("resolveCodexInstallationID returned empty value")
