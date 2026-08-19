@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/proxy"
 	"golang.org/x/oauth2"
@@ -23,7 +24,6 @@ import (
 )
 
 const defaultAPICallTimeout = 60 * time.Second
-const codexQuotaProbeLogBodyLimit = 512
 
 const (
 	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
@@ -213,6 +213,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 
 	h.logCodexQuotaProbeResult(auth, authIndex, parsedURL, resp.StatusCode, respBody)
+	h.captureCodexQuotaSnapshot(auth, authIndex, parsedURL, resp.StatusCode, respBody)
 	h.syncQuotaProbeFromAPICall(c.Request.Context(), auth, parsedURL, resp.StatusCode, respBody)
 
 	c.JSON(http.StatusOK, apiCallResponse{
@@ -220,6 +221,36 @@ func (h *Handler) APICall(c *gin.Context) {
 		Header:     resp.Header,
 		Body:       string(respBody),
 	})
+}
+
+func (h *Handler) captureCodexQuotaSnapshot(auth *coreauth.Auth, authIndex string, requestURL *url.URL, statusCode int, respBody []byte) {
+	if auth == nil || requestURL == nil || statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices || !isCodexUsageProbeRequest(requestURL) {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return
+	}
+	account := maskedAuditAccount(auth)
+	if authIndex == "" {
+		authIndex = auth.EnsureIndex()
+	}
+	coreusage.RecordQuotaSnapshot(auth.ID, authIndex, account, time.Now().UTC(), respBody)
+}
+
+func maskedAuditAccount(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	kind, value := auth.AccountInfo()
+	if strings.EqualFold(strings.TrimSpace(kind), "api_key") {
+		return ""
+	}
+	value = strings.TrimSpace(value)
+	at := strings.LastIndexByte(value, '@')
+	if at <= 0 || at == len(value)-1 {
+		return ""
+	}
+	return value[:1] + "***" + value[at:]
 }
 
 func (h *Handler) logCodexQuotaProbeResult(auth *coreauth.Auth, authIndex string, requestURL *url.URL, statusCode int, respBody []byte) {
@@ -242,14 +273,12 @@ func (h *Handler) logCodexQuotaProbeResult(auth *coreauth.Auth, authIndex string
 
 	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
 		log.WithFields(fields).
-			WithField("body_snippet", codexQuotaProbeBodySnippet(respBody)).
 			Warn("codex quota probe upstream returned non-2xx")
 		return
 	}
 
 	if !json.Valid(respBody) {
 		log.WithFields(fields).
-			WithField("body_snippet", codexQuotaProbeBodySnippet(respBody)).
 			Warn("codex quota probe upstream returned invalid json")
 		return
 	}
@@ -272,16 +301,7 @@ func (h *Handler) logCodexQuotaProbeResult(auth *coreauth.Auth, authIndex string
 
 	log.WithFields(fields).
 		WithField("payload_shape", codexQuotaProbePayloadShape(respBody)).
-		WithField("body_snippet", codexQuotaProbeBodySnippet(respBody)).
 		Warn("codex quota probe upstream payload was not recognized")
-}
-
-func codexQuotaProbeBodySnippet(body []byte) string {
-	trimmed := strings.TrimSpace(string(body))
-	if len(trimmed) <= codexQuotaProbeLogBodyLimit {
-		return trimmed
-	}
-	return trimmed[:codexQuotaProbeLogBodyLimit] + "...(truncated)"
 }
 
 func codexQuotaProbePayloadShape(body []byte) string {

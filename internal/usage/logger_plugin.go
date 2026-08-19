@@ -48,6 +48,7 @@ func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 		return
 	}
 	p.stats.Record(ctx, record)
+	coreusage.CaptureQuotaUsage(record)
 }
 
 // SetStatisticsEnabled toggles whether in-memory statistics are recorded.

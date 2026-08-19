@@ -163,6 +163,9 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	}
 	if detail.TotalTokens == 0 {
 		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+		if strings.EqualFold(strings.TrimSpace(r.provider), "codex") {
+			total = detail.InputTokens + detail.OutputTokens
+		}
 		if total > 0 {
 			detail.TotalTokens = total
 		}
