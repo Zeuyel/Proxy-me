@@ -75,6 +75,7 @@ type QuotaAuditExport struct {
 	Usage          []QuotaAuditUsage        `json:"usage"`
 	Accounts       []QuotaAuditAccount      `json:"accounts,omitempty"`
 	PriceSnapshots map[string]PriceSnapshot `json:"price_snapshots,omitempty"`
+	ManualPrices   []string                 `json:"manual_prices,omitempty"`
 }
 
 type QuotaAuditQuery struct {
@@ -165,6 +166,7 @@ type QuotaAuditStore struct {
 	manualPrices map[string]struct{}
 	nextSequence int64
 	sampler      *QuotaCostSampler
+	changeHook   func()
 }
 
 type QuotaProbeRequest struct {
@@ -483,6 +485,27 @@ func (s *QuotaAuditStore) SetManualPriceSnapshot(model string, snapshot PriceSna
 	s.setPriceSnapshot(model, snapshot)
 }
 
+func (s *QuotaAuditStore) SetChangeHook(hook func()) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.changeHook = hook
+	s.mu.Unlock()
+}
+
+func (s *QuotaAuditStore) notifyChanged() {
+	if s == nil {
+		return
+	}
+	s.mu.RLock()
+	hook := s.changeHook
+	s.mu.RUnlock()
+	if hook != nil {
+		hook()
+	}
+}
+
 func (s *QuotaAuditStore) SyncAccounts(accounts []QuotaAuditAccount) {
 	if s == nil {
 		return
@@ -507,6 +530,7 @@ func (s *QuotaAuditStore) SyncAccounts(accounts []QuotaAuditAccount) {
 	s.mu.Lock()
 	s.accounts = next
 	s.mu.Unlock()
+	s.notifyChanged()
 }
 
 func (s *QuotaAuditStore) setPriceSnapshot(model string, snapshot PriceSnapshot) {
@@ -536,6 +560,7 @@ func (s *QuotaAuditStore) setPriceSnapshot(model string, snapshot PriceSnapshot)
 	s.prices[model] = snapshot
 	s.manualPrices[model] = struct{}{}
 	s.mu.Unlock()
+	s.notifyChanged()
 }
 
 // SetSyncedPriceSnapshot stores a remotely sourced price unless a manual price exists.
@@ -558,7 +583,6 @@ func (s *QuotaAuditStore) SetSyncedPriceSnapshot(model string, snapshot PriceSna
 	}
 	snapshot = clonePriceSnapshot(snapshot)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.prices == nil {
 		s.prices = make(map[string]PriceSnapshot)
 	}
@@ -566,9 +590,12 @@ func (s *QuotaAuditStore) SetSyncedPriceSnapshot(model string, snapshot PriceSna
 		s.manualPrices = make(map[string]struct{})
 	}
 	if _, manual := s.manualPrices[model]; manual {
+		s.mu.Unlock()
 		return false
 	}
 	s.prices[model] = snapshot
+	s.mu.Unlock()
+	s.notifyChanged()
 	return true
 }
 
@@ -624,6 +651,7 @@ func (s *QuotaAuditStore) CaptureUsage(record Record) {
 	}
 	s.usage = append(s.usage, item)
 	s.mu.Unlock()
+	s.notifyChanged()
 	if s.sampler != nil {
 		s.sampler.Observe(context.Background(), item)
 	}
@@ -675,6 +703,9 @@ func (s *QuotaAuditStore) RecordQuotaSnapshot(authID, authIndex, account string,
 		s.snapshots = append([]QuotaWindowSnapshot(nil), s.snapshots[len(s.snapshots)-10000:]...)
 	}
 	s.mu.Unlock()
+	if added > 0 {
+		s.notifyChanged()
+	}
 	return added
 }
 
@@ -693,16 +724,28 @@ func (s *QuotaAuditStore) Export() QuotaAuditExport {
 	for key, value := range s.prices {
 		result.PriceSnapshots[key] = clonePriceSnapshot(value)
 	}
+	for model := range s.manualPrices {
+		result.ManualPrices = append(result.ManualPrices, model)
+	}
+	sort.Strings(result.ManualPrices)
 	s.mu.RUnlock()
 	return result
 }
 
 func (s *QuotaAuditStore) Merge(export QuotaAuditExport) (addedSnapshots, addedUsage int64) {
+	return s.merge(export, true)
+}
+
+// MergePersisted restores a state file without treating remote price snapshots as manual overrides.
+func (s *QuotaAuditStore) MergePersisted(export QuotaAuditExport) (addedSnapshots, addedUsage int64) {
+	return s.merge(export, false)
+}
+
+func (s *QuotaAuditStore) merge(export QuotaAuditExport, importedPricesManual bool) (addedSnapshots, addedUsage int64) {
 	if s == nil {
 		return 0, 0
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.prices == nil {
 		s.prices = make(map[string]PriceSnapshot)
 	}
@@ -725,6 +768,14 @@ func (s *QuotaAuditStore) Merge(export QuotaAuditExport) (addedSnapshots, addedU
 		model = normalizeQuotaAuditModel(model)
 		if _, exists := s.prices[model]; !exists {
 			s.prices[model] = clonePriceSnapshot(price)
+			if importedPricesManual {
+				s.manualPrices[model] = struct{}{}
+			}
+		}
+	}
+	for _, model := range export.ManualPrices {
+		model = normalizeQuotaAuditModel(model)
+		if model != "" {
 			s.manualPrices[model] = struct{}{}
 		}
 	}
@@ -758,6 +809,10 @@ func (s *QuotaAuditStore) Merge(export QuotaAuditExport) (addedSnapshots, addedU
 		}
 		s.usage = append(s.usage, item)
 		addedUsage++
+	}
+	s.mu.Unlock()
+	if len(export.Accounts) > 0 || len(export.PriceSnapshots) > 0 || len(export.ManualPrices) > 0 || addedSnapshots > 0 || addedUsage > 0 {
+		s.notifyChanged()
 	}
 	return addedSnapshots, addedUsage
 }

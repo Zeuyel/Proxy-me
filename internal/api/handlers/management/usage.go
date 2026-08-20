@@ -19,18 +19,8 @@ import (
 
 const quotaAuditPriceSyncInterval = 15 * time.Minute
 
-type usageExportPayload struct {
-	Version    int                        `json:"version"`
-	ExportedAt time.Time                  `json:"exported_at"`
-	Usage      usage.StatisticsSnapshot   `json:"usage"`
-	QuotaAudit coreusage.QuotaAuditExport `json:"quota_audit,omitempty"`
-}
-
-type usageImportPayload struct {
-	Version    int                        `json:"version"`
-	Usage      usage.StatisticsSnapshot   `json:"usage"`
-	QuotaAudit coreusage.QuotaAuditExport `json:"quota_audit"`
-}
+type usageExportPayload = usage.StateFile
+type usageImportPayload = usage.StateFile
 
 // GetUsageStatistics returns the in-memory request statistics snapshot.
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
@@ -84,7 +74,8 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 	}
 
 	result := h.usageStats.MergeSnapshot(payload.Usage)
-	quotaSnapshots, quotaUsage := coreusage.DefaultQuotaAuditStore().Merge(payload.QuotaAudit)
+	quotaSnapshots, quotaUsage := coreusage.DefaultQuotaAuditStore().MergePersisted(payload.QuotaAudit)
+	usage.PersistUsageState()
 	snapshot := h.usageStats.Snapshot()
 	c.JSON(http.StatusOK, gin.H{
 		"added":           result.Added,

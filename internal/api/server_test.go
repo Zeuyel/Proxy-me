@@ -1,25 +1,60 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"golang.org/x/crypto/bcrypt"
 )
+
+func usageRecordForStateFlush() coreusage.Record {
+	return coreusage.Record{Provider: "codex", APIKey: "stop-state-api", Model: "gpt-5.4", RequestID: "stop-state-request", RequestedAt: time.Now().UTC(), Detail: coreusage.Detail{InputTokens: 1, OutputTokens: 2, TotalTokens: 3}}
+}
+
+func TestServerStopFlushesUsageState(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state", "usage-state.json")
+	t.Setenv("USAGE_STATE_PATH", statePath)
+	t.Cleanup(usage.CloseUsageState)
+	usage.SetStatisticsEnabled(true)
+	t.Cleanup(func() { usage.SetStatisticsEnabled(false) })
+	server := newTestServer(t)
+	usage.GetRequestStatistics().Record(context.Background(), usageRecordForStateFlush())
+	usage.PersistUsageState()
+	if err := server.Stop(context.Background()); err != nil {
+		t.Fatalf("stop server: %v", err)
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read flushed state: %v", err)
+	}
+	var state usage.StateFile
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("decode flushed state: %v", err)
+	}
+	if details := state.Usage.APIs["stop-state-api"].Models["gpt-5.4"].Details; len(details) != 1 || details[0].RequestID != "stop-state-request" {
+		t.Fatalf("flushed usage details = %#v", details)
+	}
+}
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
+	t.Cleanup(usage.CloseUsageState)
 
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")

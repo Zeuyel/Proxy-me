@@ -38,19 +38,21 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                 *config.Config
-	configFilePath      string
-	mu                  sync.Mutex
-	attemptsMu          sync.Mutex
-	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *coreauth.Manager
-	usageStats          *usage.RequestStatistics
-	priceSync           *coreusage.CCHPriceSync
-	tokenStore          coreauth.Store
-	localPassword       string
-	allowRemoteOverride bool
-	envSecret           string
-	logDir              string
+	cfg                  *config.Config
+	configFilePath       string
+	mu                   sync.Mutex
+	attemptsMu           sync.Mutex
+	priceSyncMu          sync.Mutex
+	priceSyncLastAttempt time.Time
+	failedAttempts       map[string]*attemptInfo // keyed by client IP
+	authManager          *coreauth.Manager
+	usageStats           *usage.RequestStatistics
+	priceSync            *coreusage.CCHPriceSync
+	tokenStore           coreauth.Store
+	localPassword        string
+	allowRemoteOverride  bool
+	envSecret            string
+	logDir               string
 }
 
 // NewHandler creates a new management handler instance.
@@ -70,6 +72,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	}
 	h.priceSync = coreusage.NewCCHPriceSync(coreusage.DefaultQuotaAuditStore())
 	coreusage.SetQuotaProbe(h.probeCodexQuotaUsage)
+	usage.ConfigureUsageState(configFilePath)
 	h.startAttemptCleanup()
 	return h
 }

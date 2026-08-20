@@ -880,10 +880,14 @@ func (s *Server) Stop(ctx context.Context) error {
 		default:
 		}
 	}
+	defer usage.CloseUsageState()
 
 	// Shutdown the HTTP server.
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
+	}
+	if err := usage.FlushUsageState(); err != nil {
+		return fmt.Errorf("failed to persist usage state: %v", err)
 	}
 
 	log.Debug("API server stopped")
