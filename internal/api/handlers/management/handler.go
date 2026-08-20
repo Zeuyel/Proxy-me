@@ -69,6 +69,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		envSecret:           envSecret,
 	}
 	h.priceSync = coreusage.NewCCHPriceSync(coreusage.DefaultQuotaAuditStore())
+	coreusage.SetQuotaProbe(h.probeCodexQuotaUsage)
 	h.startAttemptCleanup()
 	return h
 }

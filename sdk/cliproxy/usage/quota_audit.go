@@ -1,10 +1,13 @@
 package usage
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"math"
+	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
@@ -161,14 +164,286 @@ type QuotaAuditStore struct {
 	prices       map[string]PriceSnapshot
 	manualPrices map[string]struct{}
 	nextSequence int64
+	sampler      *QuotaCostSampler
+}
+
+type QuotaProbeRequest struct {
+	AuthID    string
+	AuthIndex string
+}
+
+type QuotaProbeFunc func(context.Context, QuotaProbeRequest) error
+
+type QuotaCostSamplerOptions struct {
+	MinCostUSD   float64
+	MaxCostUSD   float64
+	Random       func() float64
+	RetryBase    time.Duration
+	RetryMax     time.Duration
+	ProbeTimeout time.Duration
+}
+
+type QuotaCostSampler struct {
+	mu           sync.Mutex
+	states       map[string]*quotaSamplerState
+	probe        QuotaProbeFunc
+	random       func() float64
+	minCostUSD   float64
+	maxCostUSD   float64
+	retryBase    time.Duration
+	retryMax     time.Duration
+	probeTimeout time.Duration
+	closed       bool
+}
+
+type quotaSamplerState struct {
+	authID       string
+	authIndex    string
+	accumulated  float64
+	target       float64
+	inFlight     bool
+	pending      bool
+	retryCount   int
+	retryAt      time.Time
+	seenRequests map[string]struct{}
+	timer        *time.Timer
+}
+
+var ErrQuotaSamplerClosed = errors.New("quota cost sampler is closed")
+
+func NewQuotaCostSampler(probe QuotaProbeFunc, options QuotaCostSamplerOptions) *QuotaCostSampler {
+	minCost := options.MinCostUSD
+	maxCost := options.MaxCostUSD
+	if minCost <= 0 {
+		minCost = 20
+	}
+	if maxCost < minCost {
+		maxCost = minCost
+	}
+	randomFn := options.Random
+	if randomFn == nil {
+		randomFn = rand.Float64
+	}
+	retryBase := options.RetryBase
+	if retryBase <= 0 {
+		retryBase = 15 * time.Second
+	}
+	retryMax := options.RetryMax
+	if retryMax < retryBase {
+		retryMax = 10 * time.Minute
+	}
+	probeTimeout := options.ProbeTimeout
+	if probeTimeout <= 0 {
+		probeTimeout = 15 * time.Second
+	}
+	return &QuotaCostSampler{
+		states:       make(map[string]*quotaSamplerState),
+		probe:        probe,
+		random:       randomFn,
+		minCostUSD:   minCost,
+		maxCostUSD:   maxCost,
+		retryBase:    retryBase,
+		retryMax:     retryMax,
+		probeTimeout: probeTimeout,
+	}
+}
+
+func (s *QuotaCostSampler) SetProbe(probe QuotaProbeFunc) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.probe = probe
+	if s.closed || probe == nil {
+		s.mu.Unlock()
+		return
+	}
+	launches := s.collectReadyLaunchesLocked(time.Now())
+	s.mu.Unlock()
+	for _, launch := range launches {
+		s.launch(launch)
+	}
+}
+
+func (s *QuotaCostSampler) Observe(_ context.Context, item QuotaAuditUsage) {
+	if s == nil || item.CostUSD == nil || !strings.EqualFold(strings.TrimSpace(item.Provider), "codex") {
+		return
+	}
+	authIndex := strings.TrimSpace(item.AuthIndex)
+	identity := authIndex
+	if identity == "" {
+		identity = strings.TrimSpace(item.AuthID)
+	}
+	if identity == "" {
+		return
+	}
+	cost := *item.CostUSD
+	if math.IsNaN(cost) || math.IsInf(cost, 0) || cost < 0 {
+		return
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	state := s.states[identity]
+	if state == nil {
+		state = &quotaSamplerState{authID: strings.TrimSpace(item.AuthID), authIndex: authIndex, target: s.nextTargetLocked(), seenRequests: make(map[string]struct{})}
+		s.states[identity] = state
+	}
+	if state.authID == "" {
+		state.authID = strings.TrimSpace(item.AuthID)
+	}
+	if requestID := strings.TrimSpace(item.RequestID); requestID != "" {
+		if _, duplicate := state.seenRequests[requestID]; duplicate {
+			s.mu.Unlock()
+			return
+		}
+		if len(state.seenRequests) >= 10000 {
+			for oldest := range state.seenRequests {
+				delete(state.seenRequests, oldest)
+				break
+			}
+		}
+		state.seenRequests[requestID] = struct{}{}
+	}
+	state.accumulated += cost
+	if state.accumulated >= state.target {
+		state.pending = true
+	}
+	launches := s.collectReadyLaunchesLocked(time.Now())
+	s.mu.Unlock()
+	for _, launch := range launches {
+		s.launch(launch)
+	}
+}
+
+func (s *QuotaCostSampler) Close() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.closed = true
+	for _, state := range s.states {
+		if state.timer != nil {
+			state.timer.Stop()
+			state.timer = nil
+		}
+	}
+	s.mu.Unlock()
+}
+
+type quotaSamplerLaunch struct {
+	key       string
+	authID    string
+	authIndex string
+}
+
+func (s *QuotaCostSampler) nextTargetLocked() float64 {
+	value := s.random()
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		value = 0.5
+	}
+	if value < 0 {
+		value = 0
+	}
+	if value > 1 {
+		value = 1
+	}
+	return s.minCostUSD + value*(s.maxCostUSD-s.minCostUSD)
+}
+
+func (s *QuotaCostSampler) collectReadyLaunchesLocked(now time.Time) []quotaSamplerLaunch {
+	if s.probe == nil || s.closed {
+		return nil
+	}
+	launches := make([]quotaSamplerLaunch, 0)
+	for key, state := range s.states {
+		if state.pending && !state.inFlight && (state.retryAt.IsZero() || !now.Before(state.retryAt)) {
+			state.inFlight = true
+			state.retryAt = time.Time{}
+			if state.timer != nil {
+				state.timer.Stop()
+				state.timer = nil
+			}
+			launches = append(launches, quotaSamplerLaunch{key: key, authID: state.authID, authIndex: state.authIndex})
+		}
+	}
+	return launches
+}
+
+func (s *QuotaCostSampler) launch(launch quotaSamplerLaunch) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), s.probeTimeout)
+		err := ErrQuotaSamplerClosed
+		s.mu.Lock()
+		probe := s.probe
+		closed := s.closed
+		s.mu.Unlock()
+		if !closed && probe != nil {
+			err = probe(ctx, QuotaProbeRequest{AuthID: launch.authID, AuthIndex: launch.authIndex})
+		}
+		cancel()
+		s.finish(launch, err)
+	}()
+}
+
+func (s *QuotaCostSampler) finish(launch quotaSamplerLaunch, probeErr error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.states[launch.key]
+	if state == nil {
+		return
+	}
+	state.inFlight = false
+	if probeErr != nil {
+		state.pending = true
+		state.retryCount++
+		backoff := s.retryBase
+		for i := 1; i < state.retryCount && backoff < s.retryMax; i++ {
+			backoff *= 2
+			if backoff >= s.retryMax {
+				backoff = s.retryMax
+				break
+			}
+		}
+		state.retryAt = time.Now().Add(backoff)
+		if !s.closed {
+			state.timer = time.AfterFunc(backoff, func() {
+				s.mu.Lock()
+				launches := s.collectReadyLaunchesLocked(time.Now())
+				s.mu.Unlock()
+				for _, next := range launches {
+					s.launch(next)
+				}
+			})
+		}
+		return
+	}
+	state.pending = state.accumulated >= state.target
+	if state.pending {
+		state.accumulated -= state.target
+	}
+	state.target = s.nextTargetLocked()
+	state.retryCount = 0
+	state.retryAt = time.Time{}
+	if state.accumulated < state.target {
+		state.pending = false
+	}
+	launches := s.collectReadyLaunchesLocked(time.Now())
+	for _, next := range launches {
+		go s.launch(next)
+	}
 }
 
 func NewQuotaAuditStore() *QuotaAuditStore {
-	return &QuotaAuditStore{
+	store := &QuotaAuditStore{
 		accounts:     make(map[string]QuotaAuditAccount),
 		prices:       make(map[string]PriceSnapshot),
 		manualPrices: make(map[string]struct{}),
 	}
+	store.sampler = NewQuotaCostSampler(nil, QuotaCostSamplerOptions{})
+	return store
 }
 
 var defaultQuotaAuditStore = NewQuotaAuditStore()
@@ -180,6 +455,8 @@ func RecordQuotaSnapshot(authID, authIndex, account string, observedAt time.Time
 }
 
 func CaptureQuotaUsage(record Record) { defaultQuotaAuditStore.CaptureUsage(record) }
+
+func SetQuotaProbe(probe QuotaProbeFunc) { defaultQuotaAuditStore.SetQuotaProbe(probe) }
 
 func SetPriceSnapshot(model string, snapshot PriceSnapshot) {
 	defaultQuotaAuditStore.SetPriceSnapshot(model, snapshot)
@@ -347,6 +624,20 @@ func (s *QuotaAuditStore) CaptureUsage(record Record) {
 	}
 	s.usage = append(s.usage, item)
 	s.mu.Unlock()
+	if s.sampler != nil {
+		s.sampler.Observe(context.Background(), item)
+	}
+}
+
+func (s *QuotaAuditStore) SetQuotaProbe(probe QuotaProbeFunc) {
+	if s == nil {
+		return
+	}
+	if s.sampler == nil {
+		s.sampler = NewQuotaCostSampler(probe, QuotaCostSamplerOptions{})
+		return
+	}
+	s.sampler.SetProbe(probe)
 }
 
 func (s *QuotaAuditStore) RecordQuotaSnapshot(authID, authIndex, account string, observedAt time.Time, payload []byte) int {
