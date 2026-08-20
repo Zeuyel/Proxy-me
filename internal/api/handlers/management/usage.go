@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,7 +14,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 )
+
+const quotaAuditPriceSyncInterval = 15 * time.Minute
 
 type usageExportPayload struct {
 	Version    int                        `json:"version"`
@@ -42,6 +46,8 @@ func (h *Handler) GetUsageStatistics(c *gin.Context) {
 
 // ExportUsageStatistics returns a complete usage snapshot for backup/migration.
 func (h *Handler) ExportUsageStatistics(c *gin.Context) {
+	h.syncQuotaAuditAccounts()
+	h.syncQuotaAuditPricesIfDue(c.Request.Context())
 	var snapshot usage.StatisticsSnapshot
 	if h != nil && h.usageStats != nil {
 		snapshot = h.usageStats.Snapshot()
@@ -92,8 +98,10 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 
 // GetQuotaAudit returns parsed Codex quota snapshots joined with usage records.
 func (h *Handler) GetQuotaAudit(c *gin.Context) {
+	h.syncQuotaAuditAccounts()
+	h.syncQuotaAuditPricesIfDue(c.Request.Context())
 	query := coreusage.QuotaAuditQuery{
-		Auth: c.Query("auth"), Account: c.Query("account"), Window: c.Query("window"), Model: c.Query("model"),
+		AuthIndex: c.Query("auth_index"), Auth: c.Query("auth"), Account: c.Query("account"), Window: c.Query("window"), Model: c.Query("model"),
 	}
 	var err error
 	if raw := c.Query("from"); raw != "" {
@@ -111,6 +119,49 @@ func (h *Handler) GetQuotaAudit(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, coreusage.BuildQuotaAudit(query))
+}
+
+func (h *Handler) syncQuotaAuditPricesIfDue(ctx context.Context) {
+	if h == nil || h.priceSync == nil {
+		return
+	}
+	now := time.Now()
+	h.priceSyncMu.Lock()
+	if !h.priceSyncLastAttempt.IsZero() && now.Sub(h.priceSyncLastAttempt) < quotaAuditPriceSyncInterval {
+		h.priceSyncMu.Unlock()
+		return
+	}
+	h.priceSyncLastAttempt = now
+	h.priceSyncMu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	syncCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if _, err := h.priceSync.Sync(syncCtx); err != nil {
+		log.WithError(err).Warn("quota audit price synchronization failed")
+	}
+}
+
+func (h *Handler) syncQuotaAuditAccounts() {
+	if h == nil || h.authManager == nil {
+		return
+	}
+	accounts := make([]coreusage.QuotaAuditAccount, 0)
+	for _, auth := range h.authManager.List() {
+		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+			continue
+		}
+		accounts = append(accounts, coreusage.QuotaAuditAccount{
+			AuthID:    auth.ID,
+			AuthIndex: auth.EnsureIndex(),
+			Account:   maskedAuditAccount(auth),
+			Provider:  auth.Provider,
+			Disabled:  auth.Disabled,
+			UpdatedAt: auth.UpdatedAt,
+		})
+	}
+	coreusage.SyncQuotaAuditAccounts(accounts)
 }
 
 // SyncQuotaAuditPrices refreshes prices from the validated CCH Plus CPT v1 feed.

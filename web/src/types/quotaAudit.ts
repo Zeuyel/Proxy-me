@@ -14,6 +14,15 @@ export interface QuotaAuditTokens {
   cached: number;
   total: number;
 }
+
+export interface QuotaAuditAccount {
+  auth_id: string;
+  auth_index?: string;
+  account?: string;
+  provider?: string;
+  disabled?: boolean;
+  updated_at?: string;
+}
 export interface QuotaAuditPriceSnapshot {
   input_per_million_usd?: number | null;
   output_per_million_usd?: number | null;
@@ -31,6 +40,8 @@ export interface QuotaAuditPriceSnapshot {
 export interface QuotaAuditRow {
   snapshot_id?: string;
   auth: string;
+  auth_id?: string;
+  auth_index?: string;
   account?: string;
   window: string;
   plan_type?: string;
@@ -73,6 +84,7 @@ export interface QuotaAuditSummary {
 export interface QuotaAuditResponse {
   snapshots?: QuotaAuditRow[];
   rows?: QuotaAuditRow[];
+  accounts?: QuotaAuditAccount[];
   summary?: QuotaAuditSummary;
   price_snapshot?: QuotaAuditPriceSnapshot | null;
 }

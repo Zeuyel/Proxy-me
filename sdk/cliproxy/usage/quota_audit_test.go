@@ -124,6 +124,25 @@ func TestQuotaAuditPriceSnapshotIsCapturedPerUsage(t *testing.T) {
 	}
 }
 
+func TestQuotaAuditRecalculatesUsageAfterPriceSync(t *testing.T) {
+	store := NewQuotaAuditStore()
+	t0 := time.Date(2026, 8, 20, 4, 30, 0, 0, time.UTC)
+	store.RecordQuotaSnapshot("a", "", "", t0, []byte(`{"rate_limit":{"primary_window":{"used_percent":0}}}`))
+	t1 := t0.Add(time.Minute)
+	store.CaptureUsage(Record{Provider: "codex", Model: "late-model", AuthID: "a", RequestedAt: t1, Detail: Detail{InputTokens: 1_000_000, OutputTokens: 500_000, TotalTokens: 1_500_000}})
+	store.SetPriceSnapshot("late-model", quotaPrice(2, 8))
+	store.RecordQuotaSnapshot("a", "", "", t1, []byte(`{"rate_limit":{"primary_window":{"used_percent":5}}}`))
+
+	rows := store.Build(QuotaAuditQuery{}, t1.Add(time.Minute)).Rows
+	if len(rows) != 2 {
+		t.Fatalf("expected two rows, got %d", len(rows))
+	}
+	row := rows[1]
+	if row.CostStatus != "priced" || row.CostDeltaUSD == nil || *row.CostDeltaUSD != 6 || row.PriceSnapshot == nil {
+		t.Fatalf("expected historical usage to be priced after sync, got %#v", row)
+	}
+}
+
 func TestQuotaAuditCostTreatsReasoningAndCachedAsSubsets(t *testing.T) {
 	tokens := QuotaAuditTokens{Input: 1_000_000, Output: 1_000_000, Reasoning: 200_000, Cached: 100_000, Total: 2_000_000}
 	price := quotaPrice(1, 2)
@@ -162,5 +181,80 @@ func TestQuotaAuditPriceSnapshotCopiesPointerRates(t *testing.T) {
 	exported := store.Export()
 	if exported.PriceSnapshots["model"].InputPerMillionUSD == nil || *exported.PriceSnapshots["model"].InputPerMillionUSD != 1 {
 		t.Fatalf("price snapshot was mutated through caller pointer: %#v", exported.PriceSnapshots["model"])
+	}
+}
+
+func TestQuotaAuditAccountsFollowAuthFiles(t *testing.T) {
+	store := NewQuotaAuditStore()
+	store.SyncAccounts([]QuotaAuditAccount{
+		{AuthID: "old-auth.json", AuthIndex: "old-index", Account: "a***@example.com", Provider: "codex"},
+		{AuthID: "new-auth.json", AuthIndex: "new-index", Account: "a***@example.com", Provider: "codex"},
+	})
+
+	response := store.Build(QuotaAuditQuery{}, time.Now().UTC())
+	if len(response.Accounts) != 2 || response.Summary.Accounts != 2 {
+		t.Fatalf("expected current auth roster in audit response, got accounts=%#v summary=%d", response.Accounts, response.Summary.Accounts)
+	}
+	response = store.Build(QuotaAuditQuery{Auth: "new-index"}, time.Now().UTC())
+	if len(response.Accounts) != 1 || response.Accounts[0].AuthID != "new-auth.json" {
+		t.Fatalf("expected auth identity filter to isolate colliding labels, got %#v", response.Accounts)
+	}
+
+	store.SyncAccounts([]QuotaAuditAccount{
+		{AuthID: "new-auth.json", AuthIndex: "new-index", Account: "n***@example.com", Provider: "codex"},
+	})
+	response = store.Build(QuotaAuditQuery{Account: "n***@example.com"}, time.Now().UTC())
+	if len(response.Accounts) != 1 || response.Accounts[0].AuthID != "new-auth.json" {
+		t.Fatalf("expected deleted auth to disappear from roster, got %#v", response.Accounts)
+	}
+}
+
+func TestQuotaAuditUsesStableAuthIndexAcrossLegacySnapshots(t *testing.T) {
+	store := NewQuotaAuditStore()
+	store.SyncAccounts([]QuotaAuditAccount{
+		{AuthID: "current-auth", AuthIndex: "stable-index", Account: "a***@example.com", Provider: "codex"},
+	})
+	t0 := time.Date(2026, 8, 20, 6, 0, 0, 0, time.UTC)
+	t1 := t0.Add(time.Minute)
+	store.RecordQuotaSnapshot("legacy-auth", "", "a***@example.com", t0, []byte(`{"rate_limit":{"primary_window":{"used_percent":10}}}`))
+	store.RecordQuotaSnapshot("current-auth", "stable-index", "a***@example.com", t1, []byte(`{"rate_limit":{"primary_window":{"used_percent":20}}}`))
+
+	response := store.Build(QuotaAuditQuery{Auth: "stable-index"}, t1)
+	if len(response.Rows) != 2 || response.Summary.Accounts != 1 {
+		t.Fatalf("expected legacy and current snapshots under one account, got rows=%#v summary=%#v", response.Rows, response.Summary)
+	}
+	if response.Rows[0].Auth != "stable-index" || response.Rows[1].Auth != "stable-index" {
+		t.Fatalf("expected stable auth index in rows, got %#v", response.Rows)
+	}
+	if response.Rows[1].QuotaDeltaPercent == nil || *response.Rows[1].QuotaDeltaPercent != 10 {
+		t.Fatalf("expected delta across auth aliases, got %#v", response.Rows[1].QuotaDeltaPercent)
+	}
+
+	response = store.Build(QuotaAuditQuery{Auth: "current-auth"}, t1)
+	if len(response.Rows) != 2 || response.Accounts[0].AuthIndex != "stable-index" {
+		t.Fatalf("expected auth id alias to select canonical account, got %#v", response)
+	}
+}
+
+func TestQuotaAuditAuthIndexSurvivesAuthIDChanges(t *testing.T) {
+	store := NewQuotaAuditStore()
+	store.SyncAccounts([]QuotaAuditAccount{
+		{AuthID: "current-auth", AuthIndex: "stable-index", Account: "a***@example.com", Provider: "codex"},
+	})
+	t0 := time.Date(2026, 8, 20, 7, 0, 0, 0, time.UTC)
+	t1 := t0.Add(time.Minute)
+	store.RecordQuotaSnapshot("previous-auth", "stable-index", "a***@example.com", t0, []byte(`{"rate_limit":{"primary_window":{"used_percent":10}}}`))
+	store.CaptureUsage(Record{Provider: "codex", Model: "gpt-5.6-codex", AuthID: "previous-auth", AuthIndex: "stable-index", RequestedAt: t0.Add(30 * time.Second), Detail: Detail{InputTokens: 1000, OutputTokens: 500, TotalTokens: 1500}})
+	store.RecordQuotaSnapshot("current-auth", "stable-index", "a***@example.com", t1, []byte(`{"rate_limit":{"primary_window":{"used_percent":20}}}`))
+
+	response := store.Build(QuotaAuditQuery{AuthIndex: "stable-index"}, t1)
+	if len(response.Rows) != 2 || response.Summary.Accounts != 1 {
+		t.Fatalf("expected one auth-index group, got rows=%#v summary=%#v", response.Rows, response.Summary)
+	}
+	if response.Rows[0].Auth != "stable-index" || response.Rows[1].Auth != "stable-index" {
+		t.Fatalf("expected canonical auth index in both rows, got %#v", response.Rows)
+	}
+	if response.Rows[1].Tokens.Total != 1500 {
+		t.Fatalf("expected usage matched by auth index, got %#v", response.Rows[1].Tokens)
 	}
 }

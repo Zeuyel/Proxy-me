@@ -5,6 +5,7 @@ const QUOTA_AUDIT_TIMEOUT_MS = 60 * 1000;
 
 export interface QuotaAuditQuery {
   account?: string;
+  auth_index?: string;
   auth?: string;
   window?: string;
   model?: string;

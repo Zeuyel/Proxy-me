@@ -70,16 +70,27 @@ type QuotaAuditUsage struct {
 type QuotaAuditExport struct {
 	Snapshots      []QuotaWindowSnapshot    `json:"snapshots"`
 	Usage          []QuotaAuditUsage        `json:"usage"`
+	Accounts       []QuotaAuditAccount      `json:"accounts,omitempty"`
 	PriceSnapshots map[string]PriceSnapshot `json:"price_snapshots,omitempty"`
 }
 
 type QuotaAuditQuery struct {
-	Auth    string
-	Account string
-	Window  string
-	Model   string
-	From    time.Time
-	To      time.Time
+	AuthIndex string
+	Auth      string
+	Account   string
+	Window    string
+	Model     string
+	From      time.Time
+	To        time.Time
+}
+
+type QuotaAuditAccount struct {
+	AuthID    string    `json:"auth_id"`
+	AuthIndex string    `json:"auth_index,omitempty"`
+	Account   string    `json:"account,omitempty"`
+	Provider  string    `json:"provider,omitempty"`
+	Disabled  bool      `json:"disabled,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type QuotaAuditTokens struct {
@@ -93,6 +104,8 @@ type QuotaAuditTokens struct {
 type QuotaAuditRow struct {
 	SnapshotID          string           `json:"snapshot_id"`
 	Auth                string           `json:"auth"`
+	AuthID              string           `json:"auth_id,omitempty"`
+	AuthIndex           string           `json:"auth_index,omitempty"`
 	Account             string           `json:"account,omitempty"`
 	Window              string           `json:"window"`
 	PlanType            string           `json:"plan_type,omitempty"`
@@ -133,23 +146,29 @@ type QuotaAuditSummary struct {
 }
 
 type QuotaAuditResponse struct {
-	Snapshots     []QuotaAuditRow   `json:"snapshots"`
-	Rows          []QuotaAuditRow   `json:"rows"`
-	Summary       QuotaAuditSummary `json:"summary"`
-	PriceSnapshot *PriceSnapshot    `json:"price_snapshot,omitempty"`
+	Snapshots     []QuotaAuditRow     `json:"snapshots"`
+	Rows          []QuotaAuditRow     `json:"rows"`
+	Accounts      []QuotaAuditAccount `json:"accounts"`
+	Summary       QuotaAuditSummary   `json:"summary"`
+	PriceSnapshot *PriceSnapshot      `json:"price_snapshot,omitempty"`
 }
 
 type QuotaAuditStore struct {
 	mu           sync.RWMutex
 	snapshots    []QuotaWindowSnapshot
 	usage        []QuotaAuditUsage
+	accounts     map[string]QuotaAuditAccount
 	prices       map[string]PriceSnapshot
 	manualPrices map[string]struct{}
 	nextSequence int64
 }
 
 func NewQuotaAuditStore() *QuotaAuditStore {
-	return &QuotaAuditStore{prices: make(map[string]PriceSnapshot), manualPrices: make(map[string]struct{})}
+	return &QuotaAuditStore{
+		accounts:     make(map[string]QuotaAuditAccount),
+		prices:       make(map[string]PriceSnapshot),
+		manualPrices: make(map[string]struct{}),
+	}
 }
 
 var defaultQuotaAuditStore = NewQuotaAuditStore()
@@ -171,6 +190,10 @@ func SetManualPriceSnapshot(model string, snapshot PriceSnapshot) {
 	defaultQuotaAuditStore.SetManualPriceSnapshot(model, snapshot)
 }
 
+func SyncQuotaAuditAccounts(accounts []QuotaAuditAccount) {
+	defaultQuotaAuditStore.SyncAccounts(accounts)
+}
+
 func BuildQuotaAudit(query QuotaAuditQuery) QuotaAuditResponse {
 	return defaultQuotaAuditStore.Build(query, time.Now().UTC())
 }
@@ -181,6 +204,32 @@ func (s *QuotaAuditStore) SetPriceSnapshot(model string, snapshot PriceSnapshot)
 
 func (s *QuotaAuditStore) SetManualPriceSnapshot(model string, snapshot PriceSnapshot) {
 	s.setPriceSnapshot(model, snapshot)
+}
+
+func (s *QuotaAuditStore) SyncAccounts(accounts []QuotaAuditAccount) {
+	if s == nil {
+		return
+	}
+	next := make(map[string]QuotaAuditAccount, len(accounts))
+	for _, account := range accounts {
+		account.AuthID = strings.TrimSpace(account.AuthID)
+		account.AuthIndex = strings.TrimSpace(account.AuthIndex)
+		account.Account = strings.TrimSpace(account.Account)
+		account.Provider = strings.TrimSpace(account.Provider)
+		identity := quotaAccountIdentity(account)
+		if identity == "" {
+			continue
+		}
+		if account.UpdatedAt.IsZero() {
+			account.UpdatedAt = time.Now().UTC()
+		} else {
+			account.UpdatedAt = account.UpdatedAt.UTC()
+		}
+		next[identity] = account
+	}
+	s.mu.Lock()
+	s.accounts = next
+	s.mu.Unlock()
 }
 
 func (s *QuotaAuditStore) setPriceSnapshot(model string, snapshot PriceSnapshot) {
@@ -346,6 +395,10 @@ func (s *QuotaAuditStore) Export() QuotaAuditExport {
 	s.mu.RLock()
 	result.Snapshots = append([]QuotaWindowSnapshot(nil), s.snapshots...)
 	result.Usage = append([]QuotaAuditUsage(nil), s.usage...)
+	result.Accounts = make([]QuotaAuditAccount, 0, len(s.accounts))
+	for _, account := range s.accounts {
+		result.Accounts = append(result.Accounts, account)
+	}
 	for key, value := range s.prices {
 		result.PriceSnapshots[key] = clonePriceSnapshot(value)
 	}
@@ -364,6 +417,18 @@ func (s *QuotaAuditStore) Merge(export QuotaAuditExport) (addedSnapshots, addedU
 	}
 	if s.manualPrices == nil {
 		s.manualPrices = make(map[string]struct{})
+	}
+	if s.accounts == nil {
+		s.accounts = make(map[string]QuotaAuditAccount)
+	}
+	for _, account := range export.Accounts {
+		account.AuthID = strings.TrimSpace(account.AuthID)
+		account.AuthIndex = strings.TrimSpace(account.AuthIndex)
+		account.Account = strings.TrimSpace(account.Account)
+		account.Provider = strings.TrimSpace(account.Provider)
+		if identity := quotaAccountIdentity(account); identity != "" {
+			s.accounts[identity] = account
+		}
 	}
 	for model, price := range export.PriceSnapshots {
 		model = normalizeQuotaAuditModel(model)
@@ -440,17 +505,26 @@ type quotaGroup struct {
 }
 
 func (s *QuotaAuditStore) Build(query QuotaAuditQuery, now time.Time) QuotaAuditResponse {
-	result := QuotaAuditResponse{Snapshots: []QuotaAuditRow{}, Rows: []QuotaAuditRow{}}
+	result := QuotaAuditResponse{Snapshots: []QuotaAuditRow{}, Rows: []QuotaAuditRow{}, Accounts: []QuotaAuditAccount{}}
 	if s == nil {
 		return result
 	}
 	query.Auth = strings.TrimSpace(query.Auth)
+	query.AuthIndex = strings.TrimSpace(query.AuthIndex)
 	query.Account = strings.TrimSpace(query.Account)
 	query.Window = strings.TrimSpace(query.Window)
 	query.Model = normalizeQuotaAuditModel(query.Model)
 	s.mu.RLock()
 	snapshots := append([]QuotaWindowSnapshot(nil), s.snapshots...)
 	usage := append([]QuotaAuditUsage(nil), s.usage...)
+	allAccounts := make([]QuotaAuditAccount, 0, len(s.accounts))
+	accounts := make([]QuotaAuditAccount, 0, len(s.accounts))
+	for _, account := range s.accounts {
+		allAccounts = append(allAccounts, account)
+		if quotaAccountInQuery(account, query) {
+			accounts = append(accounts, account)
+		}
+	}
 	prices := make(map[string]PriceSnapshot, len(s.prices))
 	for key, value := range s.prices {
 		prices[key] = value
@@ -459,10 +533,10 @@ func (s *QuotaAuditStore) Build(query QuotaAuditQuery, now time.Time) QuotaAudit
 
 	groups := make(map[quotaGroup][]QuotaWindowSnapshot)
 	for _, snapshot := range snapshots {
-		if !snapshotInQuery(snapshot, query) {
+		if !snapshotInQuery(snapshot, query, allAccounts) {
 			continue
 		}
-		key := quotaGroup{identity: snapshotIdentity(snapshot), window: snapshot.Window}
+		key := quotaGroup{identity: quotaSnapshotIdentity(snapshot, allAccounts), window: snapshot.Window}
 		groups[key] = append(groups[key], snapshot)
 	}
 	keys := make([]quotaGroup, 0, len(groups))
@@ -492,7 +566,8 @@ func (s *QuotaAuditStore) Build(query QuotaAuditQuery, now time.Time) QuotaAudit
 			if i > 0 {
 				previous = &items[i-1]
 			}
-			row := buildQuotaAuditRow(snapshot, previous, usage, query.Model, now, assignedUsage)
+			identity := key.identity
+			row := buildQuotaAuditRow(snapshot, previous, identity, usage, query.Model, prices, now, assignedUsage)
 			if query.Model != "" && row.Model != query.Model {
 				continue
 			}
@@ -500,7 +575,17 @@ func (s *QuotaAuditStore) Build(query QuotaAuditQuery, now time.Time) QuotaAudit
 		}
 	}
 	result.Snapshots = append(result.Snapshots, result.Rows...)
+	sort.Slice(accounts, func(i, j int) bool {
+		left := quotaAccountLabel(accounts[i])
+		right := quotaAccountLabel(accounts[j])
+		if left == right {
+			return quotaAccountIdentity(accounts[i]) < quotaAccountIdentity(accounts[j])
+		}
+		return left < right
+	})
+	result.Accounts = accounts
 	result.Summary = summarizeQuotaRows(result.Rows)
+	result.Summary.Accounts = quotaAuditAccountCount(result.Rows, accounts)
 	if query.Model != "" {
 		if price, ok := prices[query.Model]; ok {
 			result.PriceSnapshot = &price
@@ -512,6 +597,114 @@ func (s *QuotaAuditStore) Build(query QuotaAuditQuery, now time.Time) QuotaAudit
 		}
 	}
 	return result
+}
+
+func quotaAccountIdentity(account QuotaAuditAccount) string {
+	if account.AuthIndex != "" {
+		return account.AuthIndex
+	}
+	if account.AuthID != "" {
+		return account.AuthID
+	}
+	return account.Account
+}
+
+func quotaAccountLabel(account QuotaAuditAccount) string {
+	if account.Account != "" {
+		return account.Account
+	}
+	return quotaAccountIdentity(account)
+}
+
+func quotaAccountInQuery(account QuotaAuditAccount, query QuotaAuditQuery) bool {
+	identity := quotaAccountIdentity(account)
+	if query.AuthIndex != "" && !quotaIdentityMatches(query.AuthIndex, identity, account.AuthID, account.AuthIndex, account.Account) {
+		return false
+	}
+	if query.Auth != "" && !quotaIdentityMatches(query.Auth, identity, account.AuthID, account.AuthIndex, account.Account) {
+		return false
+	}
+	if query.Account != "" && !quotaIdentityMatches(query.Account, identity, account.AuthID, account.AuthIndex, account.Account) {
+		return false
+	}
+	return true
+}
+
+func quotaIdentityMatches(query string, identity string, aliases ...string) bool {
+	if query == identity {
+		return true
+	}
+	for _, alias := range aliases {
+		if query == alias {
+			return true
+		}
+	}
+	return false
+}
+
+func quotaSnapshotIdentity(snapshot QuotaWindowSnapshot, accounts []QuotaAuditAccount) string {
+	identity := quotaAccountIdentity(QuotaAuditAccount{AuthID: snapshot.AuthID, AuthIndex: snapshot.AuthIndex, Account: snapshot.Account})
+	if snapshot.AuthIndex != "" {
+		for _, account := range accounts {
+			if snapshot.AuthIndex == account.AuthIndex || snapshot.AuthIndex == account.AuthID {
+				return quotaAccountIdentity(account)
+			}
+		}
+		return identity
+	}
+	for _, account := range accounts {
+		if snapshot.AuthID != "" && (snapshot.AuthID == account.AuthID || snapshot.AuthID == account.AuthIndex) {
+			return quotaAccountIdentity(account)
+		}
+	}
+	if snapshot.Account != "" {
+		var match string
+		for _, account := range accounts {
+			if snapshot.Account != account.Account {
+				continue
+			}
+			candidate := quotaAccountIdentity(account)
+			if match != "" && match != candidate {
+				return identity
+			}
+			match = candidate
+		}
+		if match != "" {
+			return match
+		}
+	}
+	return identity
+}
+
+func quotaSnapshotMatchesQuery(value string, snapshot QuotaWindowSnapshot, identity string, accounts []QuotaAuditAccount) bool {
+	if quotaIdentityMatches(value, identity, snapshot.AuthID, snapshot.AuthIndex, snapshot.Account) {
+		return true
+	}
+	for _, account := range accounts {
+		if quotaAccountIdentity(account) == identity && quotaIdentityMatches(value, identity, account.AuthID, account.AuthIndex, account.Account) {
+			return true
+		}
+	}
+	return false
+}
+
+func quotaAuditAccountCount(rows []QuotaAuditRow, accounts []QuotaAuditAccount) int {
+	seen := make(map[string]struct{}, len(rows)+len(accounts))
+	for _, account := range accounts {
+		if identity := quotaAccountIdentity(account); identity != "" {
+			seen[identity] = struct{}{}
+		}
+	}
+	for _, row := range rows {
+		identity := strings.TrimSpace(row.Auth)
+		if identity == "" {
+			identity = strings.TrimSpace(row.Account)
+		}
+		if identity != "" {
+			seen[identity] = struct{}{}
+		}
+	}
+	return len(seen)
 }
 
 func windowRank(window string) int {
@@ -527,14 +720,18 @@ func windowRank(window string) int {
 	}
 }
 
-func snapshotInQuery(snapshot QuotaWindowSnapshot, query QuotaAuditQuery) bool {
+func snapshotInQuery(snapshot QuotaWindowSnapshot, query QuotaAuditQuery, accounts []QuotaAuditAccount) bool {
 	if query.Window != "" && !strings.EqualFold(query.Window, snapshot.Window) {
 		return false
 	}
-	if query.Auth != "" && query.Auth != snapshot.AuthID && query.Auth != snapshot.AuthIndex && query.Auth != snapshot.Account {
+	identity := quotaSnapshotIdentity(snapshot, accounts)
+	if query.AuthIndex != "" && !quotaSnapshotMatchesQuery(query.AuthIndex, snapshot, identity, accounts) {
 		return false
 	}
-	if query.Account != "" && query.Account != snapshot.Account && query.Account != snapshot.AuthID && query.Account != snapshot.AuthIndex {
+	if query.Auth != "" && !quotaSnapshotMatchesQuery(query.Auth, snapshot, identity, accounts) {
+		return false
+	}
+	if query.Account != "" && !quotaSnapshotMatchesQuery(query.Account, snapshot, identity, accounts) {
 		return false
 	}
 	if !query.From.IsZero() && snapshot.ObservedAt.Before(query.From) {
@@ -546,19 +743,9 @@ func snapshotInQuery(snapshot QuotaWindowSnapshot, query QuotaAuditQuery) bool {
 	return true
 }
 
-func snapshotIdentity(snapshot QuotaWindowSnapshot) string {
-	if snapshot.AuthID != "" {
-		return snapshot.AuthID
-	}
-	if snapshot.AuthIndex != "" {
-		return snapshot.AuthIndex
-	}
-	return snapshot.Account
-}
-
-func buildQuotaAuditRow(snapshot QuotaWindowSnapshot, previous *QuotaWindowSnapshot, usage []QuotaAuditUsage, modelFilter string, now time.Time, assigned map[string]struct{}) QuotaAuditRow {
+func buildQuotaAuditRow(snapshot QuotaWindowSnapshot, previous *QuotaWindowSnapshot, identity string, usage []QuotaAuditUsage, modelFilter string, prices map[string]PriceSnapshot, now time.Time, assigned map[string]struct{}) QuotaAuditRow {
 	row := QuotaAuditRow{
-		SnapshotID: snapshot.SnapshotID, Auth: snapshotIdentity(snapshot), Account: snapshot.Account, Window: snapshot.Window,
+		SnapshotID: snapshot.SnapshotID, Auth: identity, AuthID: snapshot.AuthID, AuthIndex: snapshot.AuthIndex, Account: snapshot.Account, Window: snapshot.Window,
 		PlanType: snapshot.PlanType, Timestamp: snapshot.ObservedAt, UsedPercent: snapshot.UsedPercent,
 		RemainingPercent: snapshot.RemainingPercent, SessionIDs: []string{}, ThreadIDs: []string{}, Tokens: QuotaAuditTokens{}, Status: "ok", CostStatus: "unpriced", Stale: quotaSnapshotStale(snapshot, now),
 	}
@@ -635,13 +822,25 @@ func buildQuotaAuditRow(snapshot QuotaWindowSnapshot, previous *QuotaWindowSnaps
 		if item.TotalTokens == 0 && item.InputTokens == 0 && item.OutputTokens == 0 && item.ReasoningTokens == 0 && item.CachedTokens == 0 {
 			continue
 		}
-		if item.CostUSD == nil {
+		itemCost := item.CostUSD
+		itemPrice := item.PriceSnapshot
+		if itemCost == nil {
+			if current, ok := prices[normalizeQuotaAuditModel(item.Model)]; ok {
+				tokens := QuotaAuditTokens{Input: item.InputTokens, Output: item.OutputTokens, Reasoning: item.ReasoningTokens, Cached: item.CachedTokens, Total: item.TotalTokens}
+				if computed, valid := calculateCost(tokens, current); valid {
+					itemCost = &computed
+					priceCopy := clonePriceSnapshot(current)
+					itemPrice = &priceCopy
+				}
+			}
+		}
+		if itemCost == nil {
 			priced = false
 			continue
 		}
-		cost += *item.CostUSD
-		if row.PriceSnapshot == nil && item.PriceSnapshot != nil {
-			priceCopy := clonePriceSnapshot(*item.PriceSnapshot)
+		cost += *itemCost
+		if row.PriceSnapshot == nil && itemPrice != nil {
+			priceCopy := clonePriceSnapshot(*itemPrice)
 			row.PriceSnapshot = &priceCopy
 		}
 	}
@@ -677,10 +876,15 @@ func matchingUsage(snapshot QuotaWindowSnapshot, usage []QuotaAuditUsage, start 
 		if !strings.EqualFold(strings.TrimSpace(item.Provider), "codex") {
 			continue
 		}
-		if snapshot.AuthID != "" && item.AuthID != snapshot.AuthID {
-			continue
-		}
-		if snapshot.AuthID == "" && snapshot.AuthIndex != "" && item.AuthIndex != snapshot.AuthIndex {
+		if snapshot.AuthIndex != "" {
+			if item.AuthIndex != "" {
+				if item.AuthIndex != snapshot.AuthIndex {
+					continue
+				}
+			} else if item.AuthID != snapshot.AuthID {
+				continue
+			}
+		} else if snapshot.AuthID != "" && item.AuthID != snapshot.AuthID {
 			continue
 		}
 		if !start.IsZero() && !item.Timestamp.After(start) {
@@ -782,7 +986,13 @@ func summarizeQuotaRows(rows []QuotaAuditRow) QuotaAuditSummary {
 	var unitSum float64
 	var unitCount int
 	for _, row := range rows {
-		accounts[row.Account] = struct{}{}
+		identity := strings.TrimSpace(row.Auth)
+		if identity == "" {
+			identity = strings.TrimSpace(row.Account)
+		}
+		if identity != "" {
+			accounts[identity] = struct{}{}
+		}
 		windows[row.Window] = struct{}{}
 		if row.UsedPercent != nil {
 			usedSum += *row.UsedPercent
