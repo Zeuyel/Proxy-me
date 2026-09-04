@@ -15,7 +15,7 @@ import (
 
 var codexQuotaSamplerURL = "https://chatgpt.com/backend-api/wham/usage"
 
-const codexQuotaSamplerUserAgent = "codex_cli_rs/0.147.0"
+const codexQuotaSamplerUserAgent = "codex_cli_rs/0.153.4"
 
 func (h *Handler) probeCodexQuotaUsage(ctx context.Context, request coreusage.QuotaProbeRequest) error {
 	if h == nil || h.authManager == nil {

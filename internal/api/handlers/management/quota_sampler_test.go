@@ -66,7 +66,7 @@ func TestProbeCodexQuotaUsageUsesOfficialHeadersProxyAndStoresSnapshot(t *testin
 		if got := request.headers.Get("Accept"); got != "application/json" {
 			t.Fatalf("accept = %q", got)
 		}
-		if got := request.headers.Get("User-Agent"); got != codexQuotaSamplerUserAgent || !strings.Contains(got, "0.147.0") {
+		if got := request.headers.Get("User-Agent"); got != codexQuotaSamplerUserAgent || !strings.Contains(got, "0.153.4") {
 			t.Fatalf("user agent = %q", got)
 		}
 	default:
