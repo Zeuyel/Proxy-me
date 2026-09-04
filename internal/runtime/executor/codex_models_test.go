@@ -24,6 +24,7 @@ func TestFetchCodexModels_UsesStaticDefinitions(t *testing.T) {
 	seen54Mini := false
 	seen55 := false
 	seen56Luna := false
+	seen6Astra := false
 	seenAutoReview := false
 	seenImage2 := false
 	for _, model := range models {
@@ -39,6 +40,8 @@ func TestFetchCodexModels_UsesStaticDefinitions(t *testing.T) {
 			seen55 = true
 		case "gpt-5.6-luna":
 			seen56Luna = true
+		case "gpt-6-astra":
+			seen6Astra = true
 		case "codex-auto-review":
 			seenAutoReview = true
 		case "gpt-image-2":
@@ -56,6 +59,9 @@ func TestFetchCodexModels_UsesStaticDefinitions(t *testing.T) {
 	}
 	if !seen56Luna {
 		t.Fatalf("expected gpt-5.6-luna in static codex model list")
+	}
+	if !seen6Astra {
+		t.Fatalf("expected gpt-6-astra in static codex model list")
 	}
 	if !seenAutoReview {
 		t.Fatalf("expected codex-auto-review in static codex model list")
@@ -81,6 +87,7 @@ func TestFilterCodexModelsForAuth_FreeOAuthRemovesOnlyUpstreamRestrictedModels(t
 		{ID: "gpt-5.6-sol"},
 		{ID: "gpt-5.6-terra"},
 		{ID: "gpt-5.6-luna"},
+		{ID: "gpt-6-astra"},
 		{ID: "codex-auto-review"},
 		{ID: "gpt-image-2"},
 	}
@@ -182,6 +189,7 @@ func TestFilterCodexModelsForAuth_TeamOAuthKeepsOnlyUpstreamTeamModels(t *testin
 		{ID: "gpt-5.6-sol"},
 		{ID: "gpt-5.6-terra"},
 		{ID: "gpt-5.6-luna"},
+		{ID: "gpt-6-astra"},
 		{ID: "codex-auto-review"},
 		{ID: "gpt-image-2"},
 		{ID: "gpt-4o"},

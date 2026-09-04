@@ -97,6 +97,7 @@ func isCodexPreferredModel(modelName string) bool {
 		"gpt-5.6-sol",
 		"gpt-5.6-terra",
 		"gpt-5.6-luna",
+		"gpt-6-astra",
 		"codex-auto-review",
 		"gpt-image-2":
 		return true
