@@ -56,7 +56,10 @@ func (h *Handler) probeCodexQuotaUsage(ctx context.Context, request coreusage.Qu
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", codexQuotaSamplerUserAgent)
+	req.Header.Set("User-Agent", auth.ClientProfileHeader("user_agent"))
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", codexQuotaSamplerUserAgent)
+	}
 	if accountID := resolveCodexAccountID(auth); accountID != "" {
 		req.Header.Set("ChatGPT-Account-ID", accountID)
 	}

@@ -44,6 +44,7 @@ export interface QuotaAuditRow {
   auth_index?: string;
   account?: string;
   window: string;
+  window_duration_seconds?: number | null;
   plan_type?: string;
   model?: string;
   session_ids?: string[];

@@ -158,6 +158,24 @@
   font-size: 14px;
 }
 
+.clientProfileField {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+  color: var(--text-secondary);
+  font-size: 14px;
+
+  select {
+    width: 100%;
+    min-height: 36px;
+    border: 1px solid var(--border-color);
+    border-radius: $radius-sm;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    padding: 0 $spacing-sm;
+  }
+}
+
 .deviceCodeRow {
   display: flex;
   align-items: center;

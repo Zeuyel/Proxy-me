@@ -261,6 +261,31 @@ func TestPatchAuthFileFieldsUpdatesMetadataAndRuntime(t *testing.T) {
 	}
 }
 
+func TestBindCodexClientProfilePersistsHeaderSnapshot(t *testing.T) {
+	h := &Handler{cfg: &config.Config{CodexClientProfiles: []config.CodexClientProfile{{
+		ID:      "omarchy",
+		Name:    "Omarchy",
+		Headers: map[string]string{"user_agent": "codex_cli_rs/0.153.4 (Linux; x86_64; Omarchy)"},
+	}}}}
+	auth := &coreauth.Auth{Provider: "codex", Metadata: map[string]any{"client_profile": "omarchy"}}
+
+	h.bindCodexClientProfile(auth)
+	if auth.ClientProfile != "omarchy" {
+		t.Fatalf("ClientProfile = %q", auth.ClientProfile)
+	}
+	if got := auth.ClientProfileHeader("User-Agent"); got != "codex_cli_rs/0.153.4 (Linux; x86_64; Omarchy)" {
+		t.Fatalf("profile user agent = %q", got)
+	}
+	h.cfg.CodexClientProfiles[0].Headers["user_agent"] = "changed"
+	if got := auth.ClientProfileHeader("user_agent"); got != "codex_cli_rs/0.153.4 (Linux; x86_64; Omarchy)" {
+		t.Fatalf("profile snapshot changed to %q", got)
+	}
+	metadata, ok := auth.Metadata["client_profile_config"].(map[string]any)
+	if !ok || metadata["user_agent"] != "codex_cli_rs/0.153.4 (Linux; x86_64; Omarchy)" {
+		t.Fatalf("metadata snapshot = %#v", auth.Metadata["client_profile_config"])
+	}
+}
+
 func TestPatchAuthFileFieldsPersistsArbitraryFieldsToFile(t *testing.T) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)

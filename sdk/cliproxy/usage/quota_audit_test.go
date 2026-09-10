@@ -51,6 +51,18 @@ func TestQuotaAuditBuildsWindowsAndCorrelatesCost(t *testing.T) {
 	if primary.QuotaDeltaPercent == nil || *primary.QuotaDeltaPercent != 15 {
 		t.Fatalf("expected primary quota delta 15, got %#v", primary.QuotaDeltaPercent)
 	}
+	if primary.WindowDurationSeconds == nil || *primary.WindowDurationSeconds != 18000 {
+		t.Fatalf("expected primary window duration, got %#v", primary.WindowDurationSeconds)
+	}
+	var secondary QuotaAuditRow
+	for _, row := range response.Rows {
+		if row.Window == "secondary" && row.Timestamp.Equal(t1) {
+			secondary = row
+		}
+	}
+	if secondary.WindowDurationSeconds == nil || *secondary.WindowDurationSeconds != 604800 {
+		t.Fatalf("expected secondary weekly duration, got %#v", secondary.WindowDurationSeconds)
+	}
 	if primary.Tokens.Total != 1500 || primary.CostStatus != "priced" || primary.CostDeltaUSD == nil {
 		t.Fatalf("expected correlated priced usage, got %#v", primary)
 	}
@@ -181,6 +193,45 @@ func TestQuotaAuditPriceSnapshotCopiesPointerRates(t *testing.T) {
 	exported := store.Export()
 	if exported.PriceSnapshots["model"].InputPerMillionUSD == nil || *exported.PriceSnapshots["model"].InputPerMillionUSD != 1 {
 		t.Fatalf("price snapshot was mutated through caller pointer: %#v", exported.PriceSnapshots["model"])
+	}
+}
+
+func TestQuotaAuditAutoReviewUsesCCHCompactPriceAlias(t *testing.T) {
+	store := NewQuotaAuditStore()
+	input, output, cached := 2.0, 8.0, 0.5
+	price := PriceSnapshot{
+		InputPerMillionUSD: &input, OutputPerMillionUSD: &output,
+		CachedPerMillionUSD: &cached, Source: "cch-plus", Version: "test",
+	}
+	store.SetSyncedPriceSnapshot("gpt-5.6-luna-low-openai-compact", price)
+
+	t0 := time.Date(2026, 8, 21, 5, 0, 0, 0, time.UTC)
+	store.RecordQuotaSnapshot("auto-review-auth", "", "", t0, []byte(`{"rate_limit":{"primary_window":{"used_percent":0}}}`))
+	store.CaptureUsage(Record{
+		Provider: "codex", Model: "codex-auto-review", AuthID: "auto-review-auth", RequestedAt: t0.Add(time.Minute),
+		Detail: Detail{InputTokens: 2_000_000, CachedTokens: 1_000_000, OutputTokens: 3_000_000, TotalTokens: 5_000_000},
+	})
+	usage := store.Export().Usage
+	if len(usage) != 1 || usage[0].PriceSnapshot == nil || usage[0].CostUSD == nil {
+		t.Fatalf("auto-review usage was not priced: %#v", usage)
+	}
+	if got := *usage[0].PriceSnapshot.InputPerMillionUSD; got != input {
+		t.Fatalf("unexpected input price: %v", got)
+	}
+	if got := *usage[0].PriceSnapshot.OutputPerMillionUSD; got != output {
+		t.Fatalf("unexpected output price: %v", got)
+	}
+	if got := *usage[0].PriceSnapshot.CachedPerMillionUSD; got != cached {
+		t.Fatalf("unexpected cached price: %v", got)
+	}
+	if got := *usage[0].CostUSD; got != 26.5 {
+		t.Fatalf("unexpected auto-review cost: %v", got)
+	}
+
+	store.RecordQuotaSnapshot("auto-review-auth", "", "", t0.Add(time.Minute), []byte(`{"rate_limit":{"primary_window":{"used_percent":10}}}`))
+	row := store.Build(QuotaAuditQuery{}, t0.Add(2*time.Minute)).Rows[1]
+	if row.CostStatus != "priced" || row.CostDeltaUSD == nil || *row.CostDeltaUSD != 26.5 {
+		t.Fatalf("historical auto-review usage was not recalculated: %#v", row)
 	}
 }
 

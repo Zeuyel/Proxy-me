@@ -70,6 +70,9 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
+	if len(cfg.CodexClientProfiles) == 0 {
+		cfg.CodexClientProfiles = config.DefaultCodexClientProfiles()
+	}
 	h.priceSync = coreusage.NewCCHPriceSync(coreusage.DefaultQuotaAuditStore())
 	coreusage.SetQuotaProbe(h.probeCodexQuotaUsage)
 	usage.ConfigureUsageState(configFilePath)

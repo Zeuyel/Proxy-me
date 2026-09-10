@@ -1,0 +1,18 @@
+@use '../styles/mixins' as *;
+
+.container { width: 100%; }
+.title { margin: 0 0 $spacing-xl; font-size: 28px; color: var(--text-primary); }
+.content { display: flex; flex-direction: column; gap: $spacing-xl; }
+.profileList, .fileList { display: flex; flex-direction: column; }
+.profileRow, .fileRow { display: flex; align-items: center; justify-content: space-between; gap: $spacing-md; padding: $spacing-md 0; border-bottom: 1px solid var(--border-color); }
+.profileName, .fileName { color: var(--text-primary); font-weight: 600; overflow-wrap: anywhere; }
+.profileAgent { margin-top: 4px; color: var(--text-secondary); font-family: $font-mono; font-size: 12px; overflow-wrap: anywhere; }
+.fileName { flex: 1; min-width: 0; }
+.fileRow select { width: 220px; min-height: 36px; border: 1px solid var(--border-color); border-radius: $radius-sm; background: var(--bg-primary); color: var(--text-primary); padding: 0 $spacing-sm; }
+.createForm { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(240px, 2fr) auto; gap: $spacing-md; align-items: end; padding-top: $spacing-lg; }
+
+@include mobile {
+  .profileRow, .fileRow { align-items: flex-start; flex-direction: column; }
+  .fileRow select { width: 100%; }
+  .createForm { grid-template-columns: 1fr; }
+}

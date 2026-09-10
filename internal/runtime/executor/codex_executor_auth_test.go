@@ -50,8 +50,11 @@ func TestCodexPrepareRequestUsesAccessTokenMetadata(t *testing.T) {
 	if got := req.Header.Get("User-Agent"); got != defaultCodexUserAgent {
 		t.Fatalf("User-Agent = %q, want %q", got, defaultCodexUserAgent)
 	}
-	if got := req.Header.Get("Chatgpt-Account-Id"); got != "" {
-		t.Fatalf("Chatgpt-Account-Id = %q, want empty by default", got)
+	if got := req.Header.Get("Chatgpt-Account-Id"); got != accountID {
+		t.Fatalf("Chatgpt-Account-Id = %q, want %q", got, accountID)
+	}
+	if got := req.Header.Get("OAI-Product-Sku"); got != codexProductSKU {
+		t.Fatalf("OAI-Product-Sku = %q, want %q", got, codexProductSKU)
 	}
 	if got := req.Header.Get("Originator"); got != defaultCodexOriginator {
 		t.Fatalf("Originator = %q, want %q", got, defaultCodexOriginator)
@@ -62,11 +65,78 @@ func TestCodexPrepareRequestUsesAccessTokenMetadata(t *testing.T) {
 	if got := req.Header.Get("Referer"); got != codexCodexReferer {
 		t.Fatalf("Referer = %q, want %q", got, codexCodexReferer)
 	}
-	if got := req.Header.Get("X-Client-Request-Id"); got != req.Header.Get("Session_id") {
-		t.Fatalf("X-Client-Request-Id = %q, want Session_id %q", got, req.Header.Get("Session_id"))
+	if got := req.Header.Get("X-Client-Request-Id"); got == "" || got == req.Header.Get("Session-Id") {
+		t.Fatalf("X-Client-Request-Id = %q, want a request id distinct from Session-Id %q", got, req.Header.Get("Session-Id"))
 	}
-	if got := req.Header.Get("Session_id"); got == "" {
-		t.Fatalf("Session_id should not be empty")
+	if got := req.Header.Get("Session-Id"); got == "" {
+		t.Fatalf("Session-Id should not be empty")
+	}
+}
+
+func TestCodexClientProfileOverridesProtectedHeaders(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"access_token": fakeCodexJWT(t, "acct-123")},
+		ClientProfileConfig: map[string]string{
+			"User-Agent":      "codex_cli_rs/0.153.4 (Linux; x86_64; Omarchy)",
+			"version":         "0.153.4",
+			"originator":      "codex_cli_rs",
+			"openai_beta":     "responses_websockets=2026-02-06",
+			"oai_product_sku": "codex",
+			"origin":          "https://chatgpt.com",
+			"referer":         "https://chatgpt.com/codex",
+		},
+	}
+
+	applyCodexHeaders(req, auth, auth.Metadata["access_token"].(string), true)
+	for key, want := range map[string]string{
+		"User-Agent":      "codex_cli_rs/0.153.4 (Linux; x86_64; Omarchy)",
+		"Version":         "0.153.4",
+		"Originator":      "codex_cli_rs",
+		"Openai-Beta":     "responses_websockets=2026-02-06",
+		"OAI-Product-Sku": "codex",
+		"Origin":          "https://chatgpt.com",
+		"Referer":         "https://chatgpt.com/codex",
+	} {
+		if got := req.Header.Get(key); got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestCodexPrepareRequestPreservesCurrentClientHeaders(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("User-Agent", "codex_cli_rs/0.147.0 (Linux 7.1.8-arch1-3; x86_64) tmux")
+	req.Header.Set("Version", "0.147.0")
+	req.Header.Set("Originator", "codex_cli_rs")
+	req.Header.Set("OAI-Product-Sku", "codex")
+
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"access_token": fakeCodexJWT(t, "acct-123")},
+	}
+	if err := NewCodexExecutor(nil).PrepareRequest(req, auth); err != nil {
+		t.Fatalf("PrepareRequest error: %v", err)
+	}
+	for key, want := range map[string]string{
+		"User-Agent":      "codex_cli_rs/0.147.0 (Linux 7.1.8-arch1-3; x86_64) tmux",
+		"Version":         "0.147.0",
+		"Originator":      "codex_cli_rs",
+		"OAI-Product-Sku": "codex",
+	} {
+		if got := req.Header.Get(key); got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if req.Header.Get("Session-Id") == "" || req.Header.Get("X-Client-Request-Id") == "" {
+		t.Fatal("client session and request identifiers should be generated")
 	}
 }
 
@@ -165,10 +235,10 @@ func TestApplyCodexHeadersBlocksInboundClientIdentityHeaders(t *testing.T) {
 	if got := req.Header.Get("User-Agent"); got != defaultCodexUserAgent {
 		t.Fatalf("User-Agent = %q, want %q", got, defaultCodexUserAgent)
 	}
-	if got := req.Header.Get("X-Client-Request-Id"); got != req.Header.Get("Session_id") {
-		t.Fatalf("X-Client-Request-Id = %q, want generated Session_id %q", got, req.Header.Get("Session_id"))
+	if got := req.Header.Get("X-Client-Request-Id"); got == "" || got == req.Header.Get("Session-Id") {
+		t.Fatalf("X-Client-Request-Id = %q, want request id distinct from Session-Id %q", got, req.Header.Get("Session-Id"))
 	}
-	if got := req.Header.Get("X-Codex-Window-Id"); got != req.Header.Get("Session_id")+":0" {
+	if got := req.Header.Get("X-Codex-Window-Id"); got != req.Header.Get("Session-Id")+":0" {
 		t.Fatalf("X-Codex-Window-Id = %q, want generated session window", got)
 	}
 	for key, want := range map[string]string{
@@ -199,8 +269,8 @@ func TestCodexCacheHelperUsesOriginalPreviousResponseIDForConversationHeaders(t 
 	}
 
 	wantConversationID := codexConversationPrefix + "resp_12345678901234567890"
-	if got := httpReq.Header.Get("Session_id"); got != wantConversationID {
-		t.Fatalf("Session_id = %q, want %q", got, wantConversationID)
+	if got := httpReq.Header.Get("Thread-Id"); got != wantConversationID {
+		t.Fatalf("Thread-Id = %q, want %q", got, wantConversationID)
 	}
 	if got := httpReq.Header.Get("Conversation_id"); got != "" {
 		t.Fatalf("Conversation_id = %q, want empty", got)
@@ -217,7 +287,7 @@ func TestCodexExecuteRejectsUnownedPreviousResponseID(t *testing.T) {
 	var gotBody []byte
 	var gotSessionID string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotSessionID = r.Header.Get("Session_id")
+		gotSessionID = r.Header.Get("Session-Id")
 		body, _ := io.ReadAll(r.Body)
 		gotBody = body
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -255,7 +325,7 @@ func TestCodexExecuteRejectsUnownedPreviousResponseID(t *testing.T) {
 		t.Fatalf("upstream prompt_cache_key was not account-scoped: %q", got)
 	}
 	if gotSessionID == "" {
-		t.Fatal("upstream Session_id should still be generated for a threadless request")
+		t.Fatal("upstream Session-Id should still be generated for a threadless request")
 	}
 }
 
@@ -291,20 +361,20 @@ func TestCodexIdentityConfuseRemapsRequestIdentity(t *testing.T) {
 	if confusedCache == "" || confusedCache == "client-cache-1234567890" {
 		t.Fatalf("prompt_cache_key was not confused: %q; body=%s", confusedCache, upstreamBody)
 	}
-	if got := httpReq.Header.Get("Session_id"); got != confusedCache {
-		t.Fatalf("Session_id = %q, want confused prompt cache %q", got, confusedCache)
+	if got := httpReq.Header.Get("Thread-Id"); got != confusedCache {
+		t.Fatalf("Thread-Id = %q, want confused prompt cache %q", got, confusedCache)
 	}
 	if got := httpReq.Header.Get("X-Client-Request-Id"); got != confusedCache {
 		t.Fatalf("X-Client-Request-Id = %q, want confused prompt cache %q", got, confusedCache)
 	}
-	if got := httpReq.Header.Get("X-Codex-Window-Id"); got != confusedCache+":0" {
-		t.Fatalf("X-Codex-Window-Id = %q, want %q", got, confusedCache+":0")
+	if got := httpReq.Header.Get("X-Codex-Window-Id"); got == confusedCache+":0" || got == "" {
+		t.Fatalf("X-Codex-Window-Id = %q, want device window identity", got)
 	}
 	if got := httpReq.Header.Get("Conversation_id"); got != "" {
 		t.Fatalf("Conversation_id = %q, want empty", got)
 	}
-	if got := httpReq.Header.Get("Chatgpt-Account-Id"); got != "" {
-		t.Fatalf("Chatgpt-Account-Id = %q, want empty", got)
+	if got := httpReq.Header.Get("Chatgpt-Account-Id"); got != "acct-123456" {
+		t.Fatalf("Chatgpt-Account-Id = %q, want acct-123456", got)
 	}
 	turnMetadata := gjson.GetBytes(upstreamBody, "client_metadata.x-codex-turn-metadata").String()
 	if got := gjson.Get(turnMetadata, "prompt_cache_key").String(); got != confusedCache {
@@ -313,8 +383,8 @@ func TestCodexIdentityConfuseRemapsRequestIdentity(t *testing.T) {
 	if got := gjson.Get(turnMetadata, "turn_id").String(); got == "" || got == "turn-123" {
 		t.Fatalf("turn metadata turn_id was not confused: %q; metadata=%s", got, turnMetadata)
 	}
-	if got := gjson.Get(turnMetadata, "window_id").String(); got != confusedCache+":0" {
-		t.Fatalf("turn metadata window_id = %q, want %q; metadata=%s", got, confusedCache+":0", turnMetadata)
+	if got := gjson.Get(turnMetadata, "window_id").String(); got != state.threadIsolation.windowID {
+		t.Fatalf("turn metadata window_id = %q, want auth-scoped device window %q; metadata=%s", got, state.threadIsolation.windowID, turnMetadata)
 	}
 	if got := gjson.GetBytes(upstreamBody, "client_metadata.x-codex-installation-id").String(); got == "" || got == "install-123" {
 		t.Fatalf("installation id was not confused: %q; body=%s", got, upstreamBody)
@@ -397,19 +467,19 @@ func TestApplyCodexHeadersRebuildsSessionAndWindowIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Session_id", "codex_prev_12345678901234567890")
+	req.Header.Set("Session-Id", "codex_prev_12345678901234567890")
 
 	applyCodexHeaders(req, &cliproxyauth.Auth{Provider: "codex"}, "token", true)
 
-	if got := req.Header.Get("Session_id"); got == "codex_prev_12345678901234567890" || got == "" {
-		t.Fatalf("Session_id = %q, want rebuilt session", got)
+	if got := req.Header.Get("Session-Id"); got == "codex_prev_12345678901234567890" || got == "" {
+		t.Fatalf("Session-Id = %q, want rebuilt session", got)
 	}
-	if got := req.Header.Get("X-Codex-Window-Id"); got != req.Header.Get("Session_id")+":0" {
+	if got := req.Header.Get("X-Codex-Window-Id"); got != req.Header.Get("Session-Id")+":0" {
 		t.Fatalf("X-Codex-Window-Id = %q, want rebuilt session window", got)
 	}
 }
 
-func TestInjectCodexClientMetadataFallsBackToDeterministicInstallationID(t *testing.T) {
+func TestInjectCodexClientMetadataUsesProxyInstallationID(t *testing.T) {
 	token := fakeCodexJWT(t, "acct-123456")
 	auth := &cliproxyauth.Auth{
 		ID:       "codex-plus-test",
@@ -427,6 +497,17 @@ func TestInjectCodexClientMetadataFallsBackToDeterministicInstallationID(t *test
 	}
 	if got := gjson.GetBytes(gotBody, "client_metadata.x-codex-installation-id").String(); got != want {
 		t.Fatalf("client_metadata.x-codex-installation-id = %q, want %q; body=%s", got, want, gotBody)
+	}
+}
+
+func TestInjectCodexClientMetadataSeparatesAuthFileDeviceInstallations(t *testing.T) {
+	authA := &cliproxyauth.Auth{ID: "auth-a", Provider: "codex"}
+	authB := &cliproxyauth.Auth{ID: "auth-b", Provider: "codex"}
+	body := []byte(`{"model":"gpt-5.5","input":"hi"}`)
+	gotA := gjson.GetBytes(injectCodexClientMetadata(body, authA), "client_metadata.x-codex-installation-id").String()
+	gotB := gjson.GetBytes(injectCodexClientMetadata(body, authB), "client_metadata.x-codex-installation-id").String()
+	if gotA == "" || gotA == gotB {
+		t.Fatalf("device installation identity was shared across auth files: %q == %q", gotA, gotB)
 	}
 }
 

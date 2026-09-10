@@ -27,6 +27,7 @@ import type {
   QuotaAuditTokens
 } from '@/types/quotaAudit';
 import { useThemeStore } from '@/stores';
+import { buildEstimatedWeeklyLimit } from './quotaAuditEstimate';
 import styles from './QuotaAuditPage.module.scss';
 
 ChartJS.register(CategoryScale, Filler, Legend, LineElement, LinearScale, PointElement, Tooltip);
@@ -45,8 +46,7 @@ interface TrendPoint {
   timestamp: string;
   usedPercent: number | null;
   quotaDeltaPercent: number | null;
-  costDeltaUsd: number | null;
-  totalTokens: number | null;
+  unitQuotaCost: number | null;
   reset: boolean;
 }
 
@@ -109,6 +109,12 @@ const normalizeRow = (value: unknown): QuotaAuditRow | null => {
   const account = toText(firstValue(value, ['account', 'email', 'auth_name'])) || undefined;
   const timestamp = toText(firstValue(value, ['timestamp', 'time', 'at', 'observed_at']));
   const window = toText(firstValue(value, ['window', 'quota_window', 'window_name'])) || 'unknown';
+  const windowDurationSeconds = readNumber(value, [
+    'window_duration_seconds',
+    'windowDurationSeconds',
+    'limit_window_seconds',
+    'limitWindowSeconds'
+  ]);
   const snapshotId = toText(firstValue(value, ['snapshot_id', 'snapshotId', 'id'])) || undefined;
   const planType = toText(firstValue(value, ['plan_type', 'planType'])) || undefined;
   const model = toText(firstValue(value, ['model', 'model_name'])) || undefined;
@@ -125,6 +131,7 @@ const normalizeRow = (value: unknown): QuotaAuditRow | null => {
     auth_index: authIndex,
     account,
     window,
+    window_duration_seconds: windowDurationSeconds,
     plan_type: planType,
     model,
     session_ids: toStringArray(firstValue(value, ['session_ids', 'sessionIds', 'sessions'])),
@@ -266,6 +273,36 @@ const getRowState = (row: QuotaAuditRow): RowState => {
   return 'ok';
 };
 
+const buildUnitQuotaCost = (rows: QuotaAuditRow[]): number | null => {
+  if (rows.length === 1) {
+    const row = rows[0];
+    return row.quota_delta_percent != null && row.quota_delta_percent > 0 &&
+      row.cost_per_quota_percent != null && Number.isFinite(row.cost_per_quota_percent)
+      ? row.cost_per_quota_percent
+      : null;
+  }
+
+  const eligibleRows = rows.filter(
+    (row) => row.quota_delta_percent != null && row.quota_delta_percent > 0
+  );
+  if (
+    eligibleRows.length === 0 ||
+    eligibleRows.some(
+      (row) =>
+        row.cost_delta_usd == null ||
+        !Number.isFinite(row.cost_delta_usd) ||
+        row.cost_per_quota_percent == null ||
+        !Number.isFinite(row.cost_per_quota_percent)
+    )
+  ) {
+    return null;
+  }
+  const totalDelta = eligibleRows.reduce((sum, row) => sum + (row.quota_delta_percent || 0), 0);
+  if (totalDelta <= 0) return null;
+  const totalCost = eligibleRows.reduce((sum, row) => sum + (row.cost_delta_usd || 0), 0);
+  return totalCost / totalDelta;
+};
+
 const buildTrend = (rows: QuotaAuditRow[]): TrendPoint[] => {
   const groups = new Map<string, QuotaAuditRow[]>();
   rows.forEach((row) => {
@@ -281,29 +318,31 @@ const buildTrend = (rows: QuotaAuditRow[]): TrendPoint[] => {
       timestamp,
       usedPercent: averageNullable(groupedRows.map((row) => row.used_percent)),
       quotaDeltaPercent: sumNullable(groupedRows.map((row) => row.quota_delta_percent)),
-      costDeltaUsd: sumNullable(groupedRows.map((row) => row.cost_delta_usd)),
-      totalTokens: sumNullable(groupedRows.map((row) => row.tokens.total)),
+      unitQuotaCost: buildUnitQuotaCost(groupedRows),
       reset: groupedRows.some((row) => getRowState(row) === 'reset')
     }));
 };
 
-const formatNumber = (value: number | null | undefined, maximumFractionDigits = 0) =>
+const formatNumber = (value: number | null | undefined, maximumFractionDigits = 0, minimumFractionDigits = 0) =>
   value == null || !Number.isFinite(value)
     ? '—'
-    : value.toLocaleString(undefined, { maximumFractionDigits, minimumFractionDigits: maximumFractionDigits });
+    : value.toLocaleString(undefined, { maximumFractionDigits, minimumFractionDigits });
 
 const formatPercent = (value: number | null | undefined) =>
-  value == null || !Number.isFinite(value) ? '—' : `${value.toFixed(2)}%`;
+  value == null || !Number.isFinite(value) ? '—' : `${formatNumber(value, 2)}%`;
 
 const formatSignedPercent = (value: number | null | undefined) => {
   if (value == null || !Number.isFinite(value)) return '—';
-  return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`;
+  return `${value > 0 ? '+' : ''}${formatNumber(value, 2)}%`;
 };
 
 const formatCurrency = (value: number | null | undefined, digits = 4) => {
   if (value == null || !Number.isFinite(value)) return '—';
   return `${value >= 0 ? '+' : '-'}$${Math.abs(value).toFixed(digits)}`;
 };
+
+const formatEstimatedCurrency = (value: number | null | undefined, digits = 4) =>
+  value == null || !Number.isFinite(value) ? '—' : `$${value.toFixed(digits)}`;
 
 const formatTimestamp = (value: string, locale: string) => {
   const date = new Date(value);
@@ -318,15 +357,13 @@ const getErrorMessage = (error: unknown) => {
 const chartColors = {
   quota: '#3b82f6',
   delta: '#f97316',
-  cost: '#10b981',
-  tokens: '#8b5cf6'
+  unitCost: '#10b981'
 };
 
 interface ChartLabels {
   usedPercent: string;
   quotaDelta: string;
-  costDelta: string;
-  totalTokens: string;
+  unitQuotaCost: string;
 }
 
 const buildQuotaChartData = (
@@ -362,7 +399,7 @@ const buildQuotaChartData = (
   ]
 });
 
-const buildCostTokenChartData = (
+const buildUnitQuotaCostChartData = (
   trend: TrendPoint[],
   language: string,
   labels: ChartLabels
@@ -370,27 +407,16 @@ const buildCostTokenChartData = (
   labels: trend.map((point) => formatTimestamp(point.timestamp, language)),
   datasets: [
     {
-      label: labels.costDelta,
-      data: trend.map((point) => point.costDeltaUsd),
-      borderColor: chartColors.cost,
-      backgroundColor: `${chartColors.cost}22`,
-      pointBackgroundColor: chartColors.cost,
+      label: labels.unitQuotaCost,
+      data: trend.map((point) => point.unitQuotaCost),
+      borderColor: chartColors.unitCost,
+      backgroundColor: `${chartColors.unitCost}22`,
+      pointBackgroundColor: chartColors.unitCost,
       pointRadius: 3,
       tension: 0.25,
       fill: true,
       spanGaps: false,
       yAxisID: 'cost'
-    },
-    {
-      label: labels.totalTokens,
-      data: trend.map((point) => point.totalTokens),
-      borderColor: chartColors.tokens,
-      backgroundColor: 'transparent',
-      pointBackgroundColor: chartColors.tokens,
-      pointRadius: 3,
-      tension: 0.25,
-      spanGaps: false,
-      yAxisID: 'tokens'
     }
   ]
 });
@@ -500,13 +526,17 @@ export function QuotaAuditPage() {
     };
   }, [response?.summary, rows.length, serverAccounts, visibleRows]);
 
+  const estimatedWeeklyLimitUsd = useMemo(
+    () => buildEstimatedWeeklyLimit(visibleRows, appliedFilters.window),
+    [appliedFilters.window, visibleRows]
+  );
+
   const priceSnapshot = response?.price_snapshot || visibleRows.find((row) => row.price_snapshot)?.price_snapshot;
 
   const chartLabels: ChartLabels = {
     usedPercent: t('quota_audit.chart_used_percent'),
     quotaDelta: t('quota_audit.chart_quota_delta'),
-    costDelta: t('quota_audit.chart_cost_delta'),
-    totalTokens: t('quota_audit.chart_total_tokens')
+    unitQuotaCost: t('quota_audit.chart_unit_quota_cost')
   };
 
   const chartOptions = useMemo<ChartOptions<'line'>>(
@@ -532,14 +562,7 @@ export function QuotaAuditPage() {
           position: 'left',
           ticks: { color: isDark ? '#9ca3af' : '#6b7280' },
           grid: { color: isDark ? '#374151' : '#e5e7eb' },
-          title: { display: true, text: t('quota_audit.cost_axis'), color: isDark ? '#9ca3af' : '#6b7280' }
-        },
-        tokens: {
-          beginAtZero: true,
-          position: 'right',
-          grid: { drawOnChartArea: false },
-          ticks: { color: isDark ? '#9ca3af' : '#6b7280' },
-          title: { display: true, text: t('quota_audit.tokens_axis'), color: isDark ? '#9ca3af' : '#6b7280' }
+          title: { display: true, text: t('quota_audit.unit_quota_cost_axis'), color: isDark ? '#9ca3af' : '#6b7280' }
         }
       }
     }),
@@ -741,12 +764,13 @@ export function QuotaAuditPage() {
               <strong>{formatCurrency(summary.costDeltaUsd)}</strong>
               <small>{formatNumber(summary.totalTokens)} {t('quota_audit.summary_tokens')}</small>
             </div>
-            <div className={styles.summaryCard}>
-              <span className={styles.summaryLabel}>{t('quota_audit.summary_quality')}</span>
-              <strong>{formatNumber(summary.staleSamples + summary.resetSamples)}</strong>
-              <small>
-                {formatNumber(summary.staleSamples)} {t('quota_audit.status_stale')} · {formatNumber(summary.resetSamples)} {t('quota_audit.status_reset')}
-              </small>
+            <div
+              className={styles.summaryCard}
+              title={t('quota_audit.summary_weekly_limit_tooltip')}
+            >
+              <span className={styles.summaryLabel}>{t('quota_audit.summary_weekly_limit')}</span>
+              <strong>{formatEstimatedCurrency(estimatedWeeklyLimitUsd)}</strong>
+              <small>{t('quota_audit.summary_weekly_limit_hint')}</small>
             </div>
           </section>
 
@@ -791,12 +815,12 @@ export function QuotaAuditPage() {
                   </div>
                   <div className={styles.chartCard}>
                     <div className={styles.cardHeader}>
-                      <h2>{t('quota_audit.cost_token_trend')}</h2>
+                      <h2>{t('quota_audit.unit_quota_cost_trend')}</h2>
                       <span>{t('quota_audit.chart_backend_cost_hint')}</span>
                     </div>
                     <div className={styles.chartCanvas}>
                       <Line
-                        data={buildCostTokenChartData(account.trend, i18n.language, chartLabels)}
+                        data={buildUnitQuotaCostChartData(account.trend, i18n.language, chartLabels)}
                         options={chartOptions}
                       />
                     </div>

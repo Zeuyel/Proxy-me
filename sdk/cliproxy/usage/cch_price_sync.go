@@ -12,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +33,8 @@ const (
 )
 
 var errPriceNotModified = errors.New("price document not modified")
+
+var cchDatedBaseModelPattern = regexp.MustCompile(`^(gpt-5\.[45])-(\d{4}-\d{2}-\d{2})$`)
 
 // PriceSyncResult is the management-safe summary of one remote price refresh.
 // It intentionally contains no model table or source response body.
@@ -132,6 +135,7 @@ func (s *CCHPriceSync) Sync(ctx context.Context) (PriceSyncResult, error) {
 		result.Failed++
 		return result, errors.New("price document contains no valid models")
 	}
+	addCCHBaseModelPriceAliases(prices)
 	result.Fingerprint = priceTableFingerprint(version, prices)
 	if result.Fingerprint == s.lastFingerprint && version == s.lastVersion {
 		result.Unchanged = len(prices)
@@ -334,6 +338,33 @@ func parseCPTPrices(raw []byte, schemaVersion string) (string, map[string]PriceS
 		prices[model] = snapshot
 	}
 	return version, prices, failed, nil
+}
+
+func addCCHBaseModelPriceAliases(prices map[string]PriceSnapshot) {
+	for _, base := range []string{"gpt-5.4", "gpt-5.5"} {
+		if _, exists := prices[base]; exists {
+			continue
+		}
+		var selected PriceSnapshot
+		var selectedDate time.Time
+		for model, snapshot := range prices {
+			matches := cchDatedBaseModelPattern.FindStringSubmatch(model)
+			if len(matches) != 3 || matches[1] != base {
+				continue
+			}
+			date, err := time.Parse("2006-01-02", matches[2])
+			if err != nil || (!selectedDate.IsZero() && !date.After(selectedDate)) {
+				continue
+			}
+			selected = clonePriceSnapshot(snapshot)
+			selectedDate = date
+		}
+		if selectedDate.IsZero() {
+			continue
+		}
+		selected.Fingerprint = priceModelFingerprint(base, selected)
+		prices[base] = selected
+	}
 }
 
 type remoteModel struct {

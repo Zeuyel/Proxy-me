@@ -51,6 +51,30 @@ func TestStartDeviceFlowParsesResponse(t *testing.T) {
 	}
 }
 
+func TestStartDeviceFlowWithHeadersUsesClientProfile(t *testing.T) {
+	origClient := newCodexDeviceHTTPClient
+	t.Cleanup(func() { newCodexDeviceHTTPClient = origClient })
+	newCodexDeviceHTTPClient = func(*config.Config) *http.Client {
+		return &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			if got := req.Header.Get("User-Agent"); got != "codex_cli_rs/0.153.4 (Linux; x86_64; Omarchy)" {
+				t.Fatalf("User-Agent = %q", got)
+			}
+			if got := req.Header.Get("Originator"); got != "codex_cli_rs" {
+				t.Fatalf("Originator = %q", got)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"device_auth_id":"device-123","user_code":"ABCD-EFGH"}`)), Header: make(http.Header), Request: req}, nil
+		})}
+	}
+
+	flow, err := (&CodexAuthenticator{}).StartDeviceFlowWithHeaders(context.Background(), &config.Config{}, map[string]string{
+		"User-Agent": "codex_cli_rs/0.153.4 (Linux; x86_64; Omarchy)",
+		"originator": "codex_cli_rs",
+	})
+	if err != nil || flow == nil {
+		t.Fatalf("StartDeviceFlowWithHeaders = %#v, %v", flow, err)
+	}
+}
+
 func TestPollCodexDeviceTokenRetriesPendingStatus(t *testing.T) {
 	var callCount int
 	client := &http.Client{

@@ -83,6 +83,25 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		if p, ok := metadata["proxy_url"].(string); ok {
 			proxyURL = p
 		}
+		clientProfile, _ := metadata["client_profile"].(string)
+		clientProfileConfig := map[string]string{}
+		if raw, ok := metadata["client_profile_config"].(map[string]any); ok {
+			for key, value := range raw {
+				if text, ok := value.(string); ok {
+					clientProfileConfig[key] = text
+				}
+			}
+		}
+		if len(clientProfileConfig) == 0 && cfg != nil && clientProfile != "" {
+			for _, profile := range cfg.CodexClientProfiles {
+				if profile.ID == clientProfile {
+					for key, value := range profile.Headers {
+						clientProfileConfig[key] = value
+					}
+					break
+				}
+			}
+		}
 
 		prefix := ""
 		if rawPrefix, ok := metadata["prefix"].(string); ok {
@@ -110,10 +129,12 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 				"source": full,
 				"path":   full,
 			},
-			ProxyURL:  proxyURL,
-			Metadata:  metadata,
-			CreatedAt: now,
-			UpdatedAt: now,
+			ProxyURL:            proxyURL,
+			ClientProfile:       clientProfile,
+			ClientProfileConfig: clientProfileConfig,
+			Metadata:            metadata,
+			CreatedAt:           now,
+			UpdatedAt:           now,
 		}
 		if rawPriority, ok := metadata["priority"]; ok {
 			switch v := rawPriority.(type) {

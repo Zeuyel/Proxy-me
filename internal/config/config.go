@@ -96,6 +96,8 @@ type Config struct {
 	// Codex configures provider-wide Codex request behavior.
 	Codex CodexConfig `yaml:"codex" json:"codex"`
 
+	CodexClientProfiles []CodexClientProfile `yaml:"codex-client-profiles,omitempty" json:"codex-client-profiles,omitempty"`
+
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
@@ -255,6 +257,19 @@ type CodexConfig struct {
 	// IdentityConfuse remaps Codex identity metadata per selected auth when
 	// sticky routing is used, reducing cross-account client telemetry reuse.
 	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
+}
+
+type CodexClientProfile struct {
+	ID      string            `yaml:"id" json:"id"`
+	Name    string            `yaml:"name" json:"name"`
+	Headers map[string]string `yaml:"headers" json:"headers"`
+}
+
+func DefaultCodexClientProfiles() []CodexClientProfile {
+	return []CodexClientProfile{
+		{ID: "endeavouros", Name: "EndeavourOS", Headers: map[string]string{"user_agent": "codex_cli_rs/0.153.4 (Linux; x86_64; EndeavourOS)"}},
+		{ID: "omarchy", Name: "Omarchy", Headers: map[string]string{"user_agent": "codex_cli_rs/0.153.4 (Linux; x86_64; Omarchy)"}},
+	}
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

@@ -50,7 +50,7 @@ const CALLBACK_PROVIDER_MAP: Partial<Record<OAuthProvider, string>> = {
 };
 
 export const oauthApi = {
-  startAuth: (provider: OAuthProvider, options?: { projectId?: string }) => {
+  startAuth: (provider: OAuthProvider, options?: { projectId?: string; clientProfile?: string }) => {
     const params: Record<string, string | boolean> = {};
     if (WEBUI_SUPPORTED.includes(provider)) {
       params.is_webui = true;
@@ -58,6 +58,7 @@ export const oauthApi = {
     if (provider === 'gemini-cli' && options?.projectId) {
       params.project_id = options.projectId;
     }
+    if (provider === 'codex' && options?.clientProfile) params.client_profile = options.clientProfile;
     return apiClient.get<OAuthStartResponse>(`/${provider}-auth-url`, {
       params: Object.keys(params).length ? params : undefined
     });
@@ -81,6 +82,8 @@ export const oauthApi = {
     apiClient.post<IFlowCookieAuthResponse>('/iflow-auth-url', { cookie }),
 
   /** Codex 设备码登录 */
-  startCodexDeviceAuth: () =>
-    apiClient.get<CodexDeviceAuthResponse>('/codex-device-auth-url')
+  startCodexDeviceAuth: (options?: { clientProfile?: string }) =>
+    apiClient.get<CodexDeviceAuthResponse>('/codex-device-auth-url', {
+      params: options?.clientProfile ? { client_profile: options.clientProfile } : undefined
+    })
 };

@@ -754,6 +754,9 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if projectID := authProjectID(auth); projectID != "" {
 		entry["project_id"] = projectID
 	}
+	if auth.ClientProfile != "" {
+		entry["client_profile"] = auth.ClientProfile
+	}
 	if accountType, account := auth.AccountInfo(); accountType != "" || account != "" {
 		if accountType != "" {
 			entry["account_type"] = accountType
@@ -1752,7 +1755,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		changed = true
 	}
 	if changed {
-		syncAuthFileMetadataFields(targetAuth, touchedRoots)
+		h.syncAuthFileMetadataFields(targetAuth, touchedRoots)
 	}
 
 	if !changed {
@@ -1876,7 +1879,7 @@ func authFileHeadersStringMap(value any) (map[string]string, bool) {
 	}
 }
 
-func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]struct{}) {
+func (h *Handler) syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]struct{}) {
 	if auth == nil || len(touchedRoots) == 0 {
 		return
 	}
@@ -1889,6 +1892,9 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 		if proxyURL, okString := auth.Metadata["proxy_url"].(string); okString {
 			auth.ProxyURL = strings.TrimSpace(proxyURL)
 		}
+	}
+	if _, ok := touchedRoots["client_profile"]; ok {
+		h.bindCodexClientProfile(auth)
 	}
 	if _, ok := touchedRoots["headers"]; ok {
 		syncAuthFileHeaderAttributes(auth)
@@ -1905,6 +1911,66 @@ func syncAuthFileMetadataFields(auth *coreauth.Auth, touchedRoots map[string]str
 	if _, ok := touchedRoots["disabled"]; ok {
 		syncAuthFileDisabledState(auth)
 	}
+}
+
+func (h *Handler) bindCodexClientProfile(auth *coreauth.Auth) {
+	if auth == nil || auth.Metadata == nil {
+		return
+	}
+	profileID, _ := auth.Metadata["client_profile"].(string)
+	profileID = strings.TrimSpace(profileID)
+	auth.ClientProfile = profileID
+	delete(auth.Metadata, "client_profile_config")
+	auth.ClientProfileConfig = nil
+	if profileID == "" {
+		return
+	}
+	config := h.codexClientProfileHeaders(profileID)
+	h.bindCodexClientProfileSnapshot(auth, profileID, config)
+	if len(config) > 0 {
+		return
+	}
+	auth.ClientProfile = ""
+	delete(auth.Metadata, "client_profile")
+}
+
+func (h *Handler) bindCodexClientProfileSnapshot(auth *coreauth.Auth, profileID string, config map[string]string) {
+	if auth == nil || auth.Metadata == nil {
+		return
+	}
+	profileID = strings.TrimSpace(profileID)
+	auth.ClientProfile = profileID
+	delete(auth.Metadata, "client_profile_config")
+	auth.ClientProfileConfig = nil
+	if len(config) > 0 {
+		metadata := make(map[string]any, len(config))
+		for key, value := range config {
+			metadata[key] = value
+		}
+		auth.ClientProfileConfig = config
+		auth.Metadata["client_profile_config"] = metadata
+	}
+}
+
+func (h *Handler) codexClientProfileHeaders(profileID string) map[string]string {
+	if h == nil || h.cfg == nil || profileID == "" {
+		return nil
+	}
+	for _, profile := range h.cfg.CodexClientProfiles {
+		if profile.ID != profileID {
+			continue
+		}
+		headers := make(map[string]string, len(profile.Headers))
+		for key, value := range profile.Headers {
+			key = strings.TrimSpace(key)
+			value = strings.TrimSpace(value)
+			if key != "" && value != "" {
+				headers[key] = value
+			}
+		}
+		return headers
+	}
+	return nil
 }
 
 func syncAuthFileHeaderAttributes(auth *coreauth.Auth) {
@@ -2713,7 +2779,13 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		return
 	}
 
-	RegisterOAuthSession(state, "codex")
+	clientProfile := strings.TrimSpace(c.Query("client_profile"))
+	profileHeaders := h.codexClientProfileHeaders(clientProfile)
+	if clientProfile != "" && len(profileHeaders) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown Codex client profile"})
+		return
+	}
+	RegisterOAuthSessionWithClientProfile(state, "codex", clientProfile, profileHeaders)
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -2808,6 +2880,10 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 				"account_id": tokenStorage.AccountID,
 			},
 		}
+		if clientProfile := GetOAuthSessionClientProfile(state); clientProfile != "" {
+			record.Metadata["client_profile"] = clientProfile
+			h.bindCodexClientProfileSnapshot(record, clientProfile, GetOAuthSessionClientProfileHeaders(state))
+		}
 		if planType != "" {
 			record.Metadata["plan_type"] = planType
 		}
@@ -2842,22 +2918,35 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 	}
 
 	authenticator := sdkAuth.NewCodexAuthenticator()
-	deviceFlow, err := authenticator.StartDeviceFlow(ctx, h.cfg)
+	clientProfile := strings.TrimSpace(c.Query("client_profile"))
+	profileHeaders := h.codexClientProfileHeaders(clientProfile)
+	if clientProfile != "" && len(profileHeaders) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown Codex client profile"})
+		return
+	}
+	deviceFlow, err := authenticator.StartDeviceFlowWithHeaders(ctx, h.cfg, profileHeaders)
 	if err != nil {
 		log.Errorf("Failed to start Codex device flow: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start codex device authentication"})
 		return
 	}
 
-	RegisterOAuthSession(state, "codex")
+	RegisterOAuthSessionWithClientProfile(state, "codex", clientProfile, profileHeaders)
 
 	go func() {
 		fmt.Println("Waiting for Codex device authentication...")
-		record, errComplete := authenticator.CompleteDeviceFlow(ctx, h.cfg, deviceFlow)
+		record, errComplete := authenticator.CompleteDeviceFlowWithHeaders(ctx, h.cfg, deviceFlow, profileHeaders)
 		if errComplete != nil {
 			log.Errorf("Codex device authentication failed: %v", errComplete)
 			SetOAuthSessionError(state, "Codex device authentication failed")
 			return
+		}
+		if clientProfile := GetOAuthSessionClientProfile(state); clientProfile != "" {
+			if record.Metadata == nil {
+				record.Metadata = make(map[string]any)
+			}
+			record.Metadata["client_profile"] = clientProfile
+			h.bindCodexClientProfileSnapshot(record, clientProfile, GetOAuthSessionClientProfileHeaders(state))
 		}
 
 		savedPath, errSave := h.saveTokenRecord(ctx, record)

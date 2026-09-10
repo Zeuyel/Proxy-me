@@ -9,7 +9,7 @@ import { UsagePage } from '@/pages/UsagePage';
 import { ConfigPage } from '@/pages/ConfigPage';
 import { LogsPage } from '@/pages/LogsPage';
 import { SystemPage } from '@/pages/SystemPage';
-import { ReverseProxiesPage } from '@/pages/ReverseProxiesPage';
+import { CodexClientProfilesPage } from '@/pages/CodexClientProfilesPage';
 import { MonitorPage } from '@/pages/MonitorPage';
 import { QuotaAuditPage } from '@/pages/QuotaAuditPage';
 
@@ -27,7 +27,7 @@ const mainRoutes = [
   { path: '/config', element: <ConfigPage /> },
   { path: '/logs', element: <LogsPage /> },
   { path: '/system', element: <SystemPage /> },
-  { path: '/reverse-proxies', element: <ReverseProxiesPage /> },
+  { path: '/codex-client-profiles', element: <CodexClientProfilesPage /> },
   { path: '/monitor', element: <MonitorPage /> },
   { path: '*', element: <Navigate to="/" replace /> },
 ];

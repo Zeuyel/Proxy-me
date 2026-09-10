@@ -548,6 +548,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/reverse-proxy-worker-url", s.mgmt.PutReverseProxyWorkerURL)
 		mgmt.PATCH("/reverse-proxy-worker-url", s.mgmt.PutReverseProxyWorkerURL)
 		mgmt.DELETE("/reverse-proxy-worker-url", s.mgmt.DeleteReverseProxyWorkerURL)
+		mgmt.GET("/codex-client-profiles", s.mgmt.GetCodexClientProfiles)
+		mgmt.PUT("/codex-client-profiles", s.mgmt.PutCodexClientProfiles)
+		mgmt.PATCH("/codex-client-profiles", s.mgmt.PutCodexClientProfiles)
 
 		// Proxy routing configuration
 		mgmt.GET("/proxy-routing", s.mgmt.GetProxyRouting)

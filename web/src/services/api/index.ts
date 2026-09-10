@@ -15,3 +15,4 @@ export * from './transformers';
 export * from './vertex';
 export * from './reverseProxies';
 export * from './quotaAudit';
+export * from './codexClientProfiles';

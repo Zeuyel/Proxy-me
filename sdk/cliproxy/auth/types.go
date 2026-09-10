@@ -38,6 +38,10 @@ type Auth struct {
 	Unavailable bool `json:"unavailable"`
 	// ProxyURL overrides the global proxy setting for this auth if provided.
 	ProxyURL string `json:"proxy_url,omitempty"`
+	// ClientProfile selects the Codex client identity profile for this auth.
+	ClientProfile string `json:"client_profile,omitempty"`
+	// ClientProfileConfig contains per-auth Codex client identity overrides.
+	ClientProfileConfig map[string]string `json:"client_profile_config,omitempty"`
 	// Attributes stores provider specific metadata needed by executors (immutable configuration).
 	Attributes map[string]string `json:"attributes,omitempty"`
 	// Metadata stores runtime mutable provider state (e.g. tokens, cookies).
@@ -196,6 +200,12 @@ func (a *Auth) Clone() *Auth {
 			copyAuth.Attributes[key] = value
 		}
 	}
+	if len(a.ClientProfileConfig) > 0 {
+		copyAuth.ClientProfileConfig = make(map[string]string, len(a.ClientProfileConfig))
+		for key, value := range a.ClientProfileConfig {
+			copyAuth.ClientProfileConfig[key] = value
+		}
+	}
 	if len(a.Metadata) > 0 {
 		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
 		for key, value := range a.Metadata {
@@ -210,6 +220,20 @@ func (a *Auth) Clone() *Auth {
 	}
 	copyAuth.Runtime = a.Runtime
 	return &copyAuth
+}
+
+func (a *Auth) ClientProfileHeader(key string) string {
+	if a == nil || len(a.ClientProfileConfig) == 0 {
+		return ""
+	}
+	key = strings.NewReplacer("-", "_", " ", "_").Replace(strings.ToLower(strings.TrimSpace(key)))
+	for name, value := range a.ClientProfileConfig {
+		name = strings.NewReplacer("-", "_", " ", "_").Replace(strings.ToLower(strings.TrimSpace(name)))
+		if name == key {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func stableAuthIndex(seed string) string {

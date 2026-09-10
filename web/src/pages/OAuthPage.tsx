@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { useNotificationStore, useThemeStore } from '@/stores';
 import { oauthApi, type OAuthProvider, type IFlowCookieAuthResponse } from '@/services/api/oauth';
+import { codexClientProfilesApi, type CodexClientProfile } from '@/services/api/codexClientProfiles';
 import { vertexApi, type VertexImportResponse } from '@/services/api/vertex';
 import styles from './OAuthPage.module.scss';
 import iconOpenaiLight from '@/assets/icons/openai-light.svg';
@@ -33,6 +34,7 @@ interface ProviderState {
   callbackSubmitting?: boolean;
   callbackStatus?: 'success' | 'error';
   callbackError?: string;
+  clientProfile?: string;
 }
 
 interface IFlowCookieState {
@@ -82,6 +84,7 @@ export function OAuthPage() {
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const [states, setStates] = useState<Record<OAuthProvider, ProviderState>>({} as Record<OAuthProvider, ProviderState>);
   const [iflowCookie, setIflowCookie] = useState<IFlowCookieState>({ cookie: '', loading: false });
+  const [codexClientProfiles, setCodexClientProfiles] = useState<CodexClientProfile[]>([]);
   const [vertexState, setVertexState] = useState<VertexImportState>({
     fileName: '',
     location: '',
@@ -94,6 +97,10 @@ export function OAuthPage() {
     return () => {
       Object.values(timers.current).forEach((timer) => window.clearInterval(timer));
     };
+  }, []);
+
+  useEffect(() => {
+    void codexClientProfilesApi.list().then(setCodexClientProfiles).catch(() => setCodexClientProfiles([]));
   }, []);
 
   const updateProviderState = (provider: OAuthProvider, next: Partial<ProviderState>) => {
@@ -148,10 +155,10 @@ export function OAuthPage() {
       callbackUrl: ''
     });
     try {
-      const res = await oauthApi.startAuth(
-        provider,
-        provider === 'gemini-cli' ? { projectId: projectId || undefined } : undefined
-      );
+      const res = await oauthApi.startAuth(provider, {
+        projectId: provider === 'gemini-cli' ? projectId || undefined : undefined,
+        clientProfile: provider === 'codex' ? states[provider]?.clientProfile : undefined
+      });
       updateProviderState(provider, { url: res.url, state: res.state, status: 'waiting', polling: true });
       if (res.state) {
         startPolling(provider, res.state);
@@ -170,7 +177,7 @@ export function OAuthPage() {
       error: undefined
     });
     try {
-      const res = await oauthApi.startCodexDeviceAuth();
+      const res = await oauthApi.startCodexDeviceAuth({ clientProfile: states[provider]?.clientProfile });
       if (res.status !== 'ok') {
         throw new Error(res.error || '');
       }
@@ -400,6 +407,19 @@ export function OAuthPage() {
                 <div className="hint">{t(provider.hintKey)}</div>
                 {provider.id === 'codex' && (
                   <div className={styles.deviceSection}>
+                    <label className={styles.clientProfileField}>
+                      <span>客户端身份</span>
+                      <select
+                        value={state.clientProfile || ''}
+                        onChange={(event) => updateProviderState(provider.id, { clientProfile: event.target.value })}
+                        disabled={state.polling || state.deviceLoading}
+                      >
+                        <option value="">默认</option>
+                        {codexClientProfiles.map((profile) => (
+                          <option key={profile.id} value={profile.id}>{profile.name}</option>
+                        ))}
+                      </select>
+                    </label>
                     <div className={styles.deviceHint}>{t('auth_login.codex_device_hint')}</div>
                     <Button
                       variant="secondary"

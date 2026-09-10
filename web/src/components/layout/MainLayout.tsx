@@ -372,7 +372,7 @@ export function MainLayout() {
     ...(config?.loggingToFile
       ? [{ path: '/logs', label: t('nav.logs'), icon: sidebarIcons.logs }]
       : []),
-    { path: '/reverse-proxies', label: t('nav.reverse_proxies'), icon: sidebarIcons.reverseProxies },
+    { path: '/codex-client-profiles', label: 'Codex 客户端身份', icon: sidebarIcons.reverseProxies },
     { path: '/system', label: t('nav.system_info'), icon: sidebarIcons.system },
     { path: '/monitor', label: t('nav.monitor'), icon: sidebarIcons.monitor },
   ];

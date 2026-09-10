@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,8 @@ type codexThreadIsolationState struct {
 	model                   string
 	clientPromptCacheKey    string
 	canonicalPromptCacheKey string
+	sessionID               string
+	windowID                string
 }
 
 type codexResponseBinding struct {
@@ -128,8 +131,8 @@ func applyCodexThreadIsolationBody(rawJSON []byte, state codexThreadIsolationSta
 		return rawJSON
 	}
 	rawJSON, _ = sjson.SetBytes(rawJSON, "prompt_cache_key", state.canonicalPromptCacheKey)
-	if gjson.GetBytes(rawJSON, "metadata.session_id").Exists() {
-		rawJSON, _ = sjson.SetBytes(rawJSON, "metadata.session_id", state.canonicalPromptCacheKey)
+	if state.sessionID != "" && gjson.GetBytes(rawJSON, "metadata.session_id").Exists() {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "metadata.session_id", state.sessionID)
 	}
 	if previous := strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String()); previous != "" {
 		if resolved := resolveCodexPreviousResponseID(previous, state.authScope); resolved != "" {
@@ -139,12 +142,58 @@ func applyCodexThreadIsolationBody(rawJSON []byte, state codexThreadIsolationSta
 		}
 	}
 	if windowID := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-window-id").String()); windowID != "" {
-		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-window-id", state.canonicalPromptCacheKey+":0")
+		if state.windowID != "" {
+			rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-window-id", state.windowID)
+		}
 	}
 	if turnMetadata := strings.TrimSpace(gjson.GetBytes(rawJSON, "client_metadata.x-codex-turn-metadata").String()); turnMetadata != "" {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "client_metadata.x-codex-turn-metadata", applyCodexThreadIsolationTurnMetadata(turnMetadata, state))
 	}
 	return rawJSON
+}
+
+func normalizeCodexInputMessageIDs(rawJSON []byte) []byte {
+	if len(rawJSON) == 0 {
+		return rawJSON
+	}
+	input := gjson.GetBytes(rawJSON, "input")
+	if !input.IsArray() {
+		return rawJSON
+	}
+	for index, item := range input.Array() {
+		typeName := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
+		id := strings.TrimSpace(item.Get("id").String())
+		prefix := codexInputIDPrefix(typeName)
+		if prefix == "" || id == "" || strings.HasPrefix(id, prefix) {
+			continue
+		}
+		var suffix string
+		for _, sourcePrefix := range []string{"item_", "call_", "msg_", "fc_", "ctc_"} {
+			if strings.HasPrefix(id, sourcePrefix) {
+				suffix = strings.TrimPrefix(id, sourcePrefix)
+				break
+			}
+		}
+		if suffix == "" {
+			continue
+		}
+		path := "input." + strconv.Itoa(index) + ".id"
+		rawJSON, _ = sjson.SetBytes(rawJSON, path, prefix+suffix)
+	}
+	return rawJSON
+}
+
+func codexInputIDPrefix(typeName string) string {
+	switch strings.ToLower(strings.TrimSpace(typeName)) {
+	case "message":
+		return "msg_"
+	case "function_call":
+		return "fc_"
+	case "function_call_output", "custom_tool_call", "custom_tool_call_output", "tool_call", "tool_call_output":
+		return "ctc_"
+	default:
+		return ""
+	}
 }
 
 func stripCodexThreadIdentifiers(rawJSON []byte) []byte {
@@ -172,7 +221,17 @@ func applyCodexThreadIsolationTurnMetadata(rawTurnMetadata string, state codexTh
 		updated, _ = sjson.Set(updated, "prompt_cache_key", state.canonicalPromptCacheKey)
 	}
 	if gjson.Get(rawTurnMetadata, "window_id").Exists() {
-		updated, _ = sjson.Set(updated, "window_id", state.canonicalPromptCacheKey+":0")
+		if state.windowID != "" {
+			updated, _ = sjson.Set(updated, "window_id", state.windowID)
+		}
+	}
+	if gjson.Get(rawTurnMetadata, "session_id").Exists() && state.sessionID != "" {
+		updated, _ = sjson.Set(updated, "session_id", state.sessionID)
+	}
+	for _, key := range []string{"thread_id", "parent_thread_id", "root_thread_id", "forked_from_thread_id"} {
+		if gjson.Get(rawTurnMetadata, key).Exists() {
+			updated, _ = sjson.Set(updated, key, state.canonicalPromptCacheKey)
+		}
 	}
 	return updated
 }
@@ -183,7 +242,11 @@ func applyCodexThreadIsolationHeaders(headers httpHeader, state codexThreadIsola
 	}
 	if state.rejectProviderThread {
 		requestID := uuid.NewString()
-		headers.Set("Session_id", requestID)
+		sessionID := strings.TrimSpace(state.sessionID)
+		if sessionID == "" {
+			sessionID = requestID
+		}
+		headers.Set("Session-Id", sessionID)
 		headers.Set("X-Client-Request-Id", requestID)
 		headers.Del("X-Codex-Parent-Thread-Id")
 		headers.Del("X-Codex-Window-Id")
@@ -195,10 +258,18 @@ func applyCodexThreadIsolationHeaders(headers httpHeader, state codexThreadIsola
 	if !state.enabled {
 		return
 	}
-	headers.Set("Session_id", state.canonicalPromptCacheKey)
+	sessionID := strings.TrimSpace(state.sessionID)
+	if sessionID == "" {
+		sessionID = uuid.NewString()
+	}
+	headers.Set("Session-Id", sessionID)
 	headers.Set("X-Client-Request-Id", state.canonicalPromptCacheKey)
 	headers.Set("Thread-Id", state.canonicalPromptCacheKey)
-	headers.Set("X-Codex-Window-Id", state.canonicalPromptCacheKey+":0")
+	windowID := strings.TrimSpace(state.windowID)
+	if windowID == "" {
+		windowID = sessionID + ":0"
+	}
+	headers.Set("X-Codex-Window-Id", windowID)
 	headers.Del("X-Codex-Parent-Thread-Id")
 	headers.Del("Conversation_id")
 	if turnMetadata := strings.TrimSpace(headers.Get("X-Codex-Turn-Metadata")); turnMetadata != "" {

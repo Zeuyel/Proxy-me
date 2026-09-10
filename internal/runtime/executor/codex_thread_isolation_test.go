@@ -84,10 +84,53 @@ func TestCodexThreadIsolationStripsForeignProviderThreadHeaders(t *testing.T) {
 		t.Fatal("foreign parent thread header was forwarded")
 	}
 	if requestA.Header.Get("X-Codex-Window-Id") == requestB.Header.Get("X-Codex-Window-Id") {
-		t.Fatal("window header was shared across auths")
+		t.Fatal("device window header was shared across auths")
 	}
 	if requestA.Header.Get("Thread-Id") == requestB.Header.Get("Thread-Id") {
 		t.Fatal("thread header was shared across auths")
+	}
+}
+
+func TestCodexThreadIsolationKeepsDeviceContextSeparateFromThreadContext(t *testing.T) {
+	exec := NewCodexExecutor(nil)
+	auth := threadIsolationTestAuth("auth-device", "account-device")
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Headers: http.Header{
+			"Session-Id":        []string{"local-session-1234567890"},
+			"X-Codex-Window-Id": []string{"local-window-1234567890"},
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5-codex",
+		Payload: []byte(`{"model":"gpt-5-codex","input":"hi","prompt_cache_key":"shared-client-thread-1234567890","client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"local-session-1234567890\",\"thread_id\":\"client-thread\",\"window_id\":\"local-window-1234567890\"}"}}`),
+	}
+	httpReq, body, state, err := exec.cacheHelper(context.Background(), opts.SourceFormat, "https://example.com/responses", auth, req, opts, req.Payload, req.Payload)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+	applyCodexHeaders(httpReq, auth, "token", true)
+	applyCodexIdentityConfuseHeaders(httpReq.Header, &state)
+	wantSessionID := state.threadIsolation.sessionID
+	wantWindowID := state.threadIsolation.windowID
+	if got := httpReq.Header.Get("Session-Id"); got != wantSessionID {
+		t.Fatalf("Session-Id = %q, want auth-scoped session %q", got, wantSessionID)
+	}
+	if got := httpReq.Header.Get("X-Codex-Window-Id"); got != wantWindowID {
+		t.Fatalf("X-Codex-Window-Id = %q, want auth-scoped window %q", got, wantWindowID)
+	}
+	if got := httpReq.Header.Get("Thread-Id"); got != state.threadIsolation.canonicalPromptCacheKey {
+		t.Fatalf("Thread-Id = %q, want canonical thread %q", got, state.threadIsolation.canonicalPromptCacheKey)
+	}
+	turnMetadata := gjson.GetBytes(body, "client_metadata.x-codex-turn-metadata").String()
+	if got := gjson.Get(turnMetadata, "session_id").String(); got != wantSessionID {
+		t.Fatalf("turn metadata session_id = %q, want auth-scoped session %q", got, wantSessionID)
+	}
+	if got := gjson.Get(turnMetadata, "thread_id").String(); got != state.threadIsolation.canonicalPromptCacheKey {
+		t.Fatalf("turn metadata thread_id = %q, want canonical thread %q", got, state.threadIsolation.canonicalPromptCacheKey)
+	}
+	if got := gjson.Get(turnMetadata, "window_id").String(); got != wantWindowID {
+		t.Fatalf("turn metadata window_id = %q, want auth-scoped window %q", got, wantWindowID)
 	}
 }
 
@@ -264,14 +307,14 @@ func TestCodexThreadIsolationAllowsRequestsWithoutThreadIdentifier(t *testing.T)
 	if state.threadIsolation.enabled || gjson.GetBytes(body, "prompt_cache_key").Exists() {
 		t.Fatalf("threadless request was assigned a persistent thread: %s", body)
 	}
-	httpReq.Header.Set("Session_id", "client-session-1234567890")
+	httpReq.Header.Set("Session-Id", "client-session-1234567890")
 	applyCodexHeaders(httpReq, auth, "token", true)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &state)
-	if httpReq.Header.Get("Session_id") == "" {
+	if httpReq.Header.Get("Session-Id") == "" {
 		t.Fatal("threadless request did not receive a normal request session id")
 	}
-	if httpReq.Header.Get("Session_id") == "client-session-1234567890" {
-		t.Fatal("threadless request reused client Session_id")
+	if httpReq.Header.Get("Session-Id") == "client-session-1234567890" {
+		t.Fatal("threadless request reused client Session-Id")
 	}
 }
 
@@ -297,6 +340,26 @@ func TestCodexThreadIsolationUsesStableIndexWhenAuthIDMissing(t *testing.T) {
 	}
 	if gjson.GetBytes(bodyA, "previous_response_id").Exists() || gjson.GetBytes(bodyB, "previous_response_id").Exists() {
 		t.Fatal("unowned provider thread was forwarded without auth ID")
+	}
+}
+
+func TestNormalizeCodexInputMessageIDs(t *testing.T) {
+	body := []byte(`{"input":[{"type":"message","role":"assistant","id":"item_test_message"},{"type":"message","role":"user","id":"msg_existing"},{"type":"function_call","id":"ctc_test_function"},{"type":"custom_tool_call","id":"call_test_tool"},{"type":"function_call_output","id":"item_function"}]}`)
+	got := normalizeCodexInputMessageIDs(body)
+	if id := gjson.GetBytes(got, "input.0.id").String(); id != "msg_test_message" {
+		t.Fatalf("message item ID = %q, want msg-prefixed ID", id)
+	}
+	if id := gjson.GetBytes(got, "input.1.id").String(); id != "msg_existing" {
+		t.Fatalf("existing message ID changed to %q", id)
+	}
+	if id := gjson.GetBytes(got, "input.2.id").String(); id != "fc_test_function" {
+		t.Fatalf("function call item ID = %q, want fc-prefixed ID", id)
+	}
+	if id := gjson.GetBytes(got, "input.3.id").String(); id != "ctc_test_tool" {
+		t.Fatalf("custom tool item ID = %q, want ctc-prefixed ID", id)
+	}
+	if id := gjson.GetBytes(got, "input.4.id").String(); id != "ctc_function" {
+		t.Fatalf("function output item ID = %q, want ctc-prefixed ID", id)
 	}
 }
 

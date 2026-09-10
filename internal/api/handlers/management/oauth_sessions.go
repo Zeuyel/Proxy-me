@@ -23,10 +23,12 @@ var (
 )
 
 type oauthSession struct {
-	Provider  string
-	Status    string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	Provider             string
+	ClientProfile        string
+	ClientProfileHeaders map[string]string
+	Status               string
+	CreatedAt            time.Time
+	ExpiresAt            time.Time
 }
 
 type oauthSessionStore struct {
@@ -53,7 +55,11 @@ func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
 	}
 }
 
-func (s *oauthSessionStore) Register(state, provider string) {
+func (s *oauthSessionStore) Register(state, provider string, profiles ...string) {
+	s.RegisterWithClientProfile(state, provider, strings.TrimSpace(strings.Join(profiles, "")), nil)
+}
+
+func (s *oauthSessionStore) RegisterWithClientProfile(state, provider, profile string, headers map[string]string) {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if state == "" || provider == "" {
@@ -65,11 +71,17 @@ func (s *oauthSessionStore) Register(state, provider string) {
 	defer s.mu.Unlock()
 
 	s.purgeExpiredLocked(now)
+	profileHeaders := make(map[string]string, len(headers))
+	for key, value := range headers {
+		profileHeaders[key] = value
+	}
 	s.sessions[state] = oauthSession{
-		Provider:  provider,
-		Status:    "",
-		CreatedAt: now,
-		ExpiresAt: now.Add(s.ttl),
+		Provider:             provider,
+		ClientProfile:        strings.TrimSpace(profile),
+		ClientProfileHeaders: profileHeaders,
+		Status:               "",
+		CreatedAt:            now,
+		ExpiresAt:            now.Add(s.ttl),
 	}
 }
 
@@ -168,7 +180,33 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 
 var oauthSessions = newOAuthSessionStore(oauthSessionTTL)
 
-func RegisterOAuthSession(state, provider string) { oauthSessions.Register(state, provider) }
+func RegisterOAuthSession(state, provider string, profile ...string) {
+	oauthSessions.Register(state, provider, profile...)
+}
+
+func RegisterOAuthSessionWithClientProfile(state, provider, profile string, headers map[string]string) {
+	oauthSessions.RegisterWithClientProfile(state, provider, profile, headers)
+}
+
+func GetOAuthSessionClientProfile(state string) string {
+	session, ok := oauthSessions.Get(state)
+	if !ok {
+		return ""
+	}
+	return session.ClientProfile
+}
+
+func GetOAuthSessionClientProfileHeaders(state string) map[string]string {
+	session, ok := oauthSessions.Get(state)
+	if !ok || len(session.ClientProfileHeaders) == 0 {
+		return nil
+	}
+	headers := make(map[string]string, len(session.ClientProfileHeaders))
+	for key, value := range session.ClientProfileHeaders {
+		headers[key] = value
+	}
+	return headers
+}
 
 func SetOAuthSessionError(state, message string) { oauthSessions.SetError(state, message) }
 

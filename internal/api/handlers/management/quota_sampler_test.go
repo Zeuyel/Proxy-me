@@ -33,11 +33,12 @@ func TestProbeCodexQuotaUsageUsesOfficialHeadersProxyAndStoresSnapshot(t *testin
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
 	auth := &coreauth.Auth{
-		ID:       "sampler-codex.json",
-		FileName: "sampler-codex.json",
-		Provider: "codex",
-		ProxyURL: proxy.URL,
-		Metadata: map[string]any{"access_token": "secret-token", "account_id": "acct-123", "email": "user@example.com"},
+		ID:                  "sampler-codex.json",
+		FileName:            "sampler-codex.json",
+		Provider:            "codex",
+		ProxyURL:            proxy.URL,
+		ClientProfileConfig: map[string]string{"user_agent": "codex_cli_rs/0.153.4 (Linux; x86_64; EndeavourOS)"},
+		Metadata:            map[string]any{"access_token": "secret-token", "account_id": "acct-123", "email": "user@example.com"},
 	}
 	registered, err := manager.Register(context.Background(), auth)
 	if err != nil {
@@ -66,7 +67,7 @@ func TestProbeCodexQuotaUsageUsesOfficialHeadersProxyAndStoresSnapshot(t *testin
 		if got := request.headers.Get("Accept"); got != "application/json" {
 			t.Fatalf("accept = %q", got)
 		}
-		if got := request.headers.Get("User-Agent"); got != codexQuotaSamplerUserAgent || !strings.Contains(got, "0.153.4") {
+		if got := request.headers.Get("User-Agent"); got != "codex_cli_rs/0.153.4 (Linux; x86_64; EndeavourOS)" {
 			t.Fatalf("user agent = %q", got)
 		}
 	default:

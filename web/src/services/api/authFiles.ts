@@ -11,6 +11,7 @@ type AuthFileStatusResponse = { status: string; disabled: boolean };
 export type AuthFileFieldsPatch = {
   prefix?: string;
   proxy_url?: string;
+  client_profile?: string;
   headers?: Record<string, string>;
   priority?: number;
   note?: string;

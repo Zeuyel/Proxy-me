@@ -62,6 +62,115 @@ func TestCCHPriceSyncSuccessAndValidation(t *testing.T) {
 	}
 }
 
+func TestCCHPriceSyncAddsLatestDatedBaseModelAliases(t *testing.T) {
+	store := NewQuotaAuditStore()
+	models := `{"version":"1","models":[
+		{"id":"gpt-5.4-2025-08-07","input":1,"output":2},
+		{"id":"gpt-5.4-2026-02-03","input":3,"output":4},
+		{"id":"gpt-5.4-fast-2026-12-01","input":90,"output":91},
+		{"id":"gpt-5.4-2026-12-01-high","input":92,"output":93},
+		{"id":"gpt-5.5-2025-11-01","input":5,"output":6},
+		{"id":"gpt-5.5-2026-01-15","input":7,"output":8},
+		{"id":"gpt-5.5-mini-2026-12-01","input":94,"output":95}
+	]}`
+	if _, err := newCCHTestSync(t, store, models, http.StatusOK).Sync(context.Background()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	exported := store.Export().PriceSnapshots
+	for _, test := range []struct {
+		base  string
+		dated string
+		input float64
+	}{
+		{base: "gpt-5.4", dated: "gpt-5.4-2026-02-03", input: 3},
+		{base: "gpt-5.5", dated: "gpt-5.5-2026-01-15", input: 7},
+	} {
+		alias, ok := exported[test.base]
+		if !ok || alias.InputPerMillionUSD == nil || *alias.InputPerMillionUSD != test.input {
+			t.Fatalf("alias %s = %#v", test.base, alias)
+		}
+		dated := exported[test.dated]
+		if alias.Source != dated.Source || alias.Version != dated.Version || alias.OutputPerMillionUSD == nil || dated.OutputPerMillionUSD == nil || *alias.OutputPerMillionUSD != *dated.OutputPerMillionUSD {
+			t.Fatalf("alias %s did not preserve the dated price: %#v vs %#v", test.base, alias, dated)
+		}
+		if alias.Fingerprint != priceModelFingerprint(test.base, alias) || alias.Fingerprint == dated.Fingerprint {
+			t.Fatalf("alias %s fingerprint = %q", test.base, alias.Fingerprint)
+		}
+	}
+}
+
+func TestCCHPriceSyncBaseModelAliasesRequireExactDateOnly(t *testing.T) {
+	store := NewQuotaAuditStore()
+	models := `{"version":"1","models":[
+		{"id":"gpt-5.4-2026-02-03","input":3,"output":4},
+		{"id":"gpt-5.5-fast-2026-12-01","input":90,"output":91},
+		{"id":"gpt-5.5-2026-02-03-mini","input":92,"output":93},
+		{"id":"gpt-5.5-pro-2026-12-01","input":94,"output":95},
+		{"id":"gpt-5.5-low-2026-12-01","input":96,"output":97},
+		{"id":"gpt-5.5-nano-2026-12-01","input":98,"output":99},
+		{"id":"gpt-5.5-2026-12-01-batch","input":100,"output":101},
+		{"id":"gpt-5.5-flex-2026-12-01","input":102,"output":103},
+		{"id":"gpt-5.5-2026-12-01-us","input":104,"output":105},
+		{"id":"gpt-5.5-2026-02-31","input":106,"output":107}
+	]}`
+	if _, err := newCCHTestSync(t, store, models, http.StatusOK).Sync(context.Background()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	exported := store.Export().PriceSnapshots
+	if alias, ok := exported["gpt-5.4"]; !ok || alias.InputPerMillionUSD == nil || *alias.InputPerMillionUSD != 3 {
+		t.Fatalf("single dated alias = %#v", alias)
+	}
+	if _, ok := exported["gpt-5.5"]; ok {
+		t.Fatalf("variant-only gpt-5.5 alias = %#v", exported["gpt-5.5"])
+	}
+}
+
+func TestCCHPriceSyncDoesNotOverrideExplicitBaseModelPrice(t *testing.T) {
+	store := NewQuotaAuditStore()
+	models := `{"version":"1","models":[
+		{"id":"gpt-5.4","input":77,"output":78},
+		{"id":"gpt-5.4-2026-02-03","input":3,"output":4},
+		{"id":"gpt-5.5-2026-01-15","input":7,"output":8}
+	]}`
+	manual := 99.0
+	store.SetManualPriceSnapshot("gpt-5.5", PriceSnapshot{InputPerMillionUSD: &manual, OutputPerMillionUSD: &manual, Version: "manual"})
+	if _, err := newCCHTestSync(t, store, models, http.StatusOK).Sync(context.Background()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	exported := store.Export().PriceSnapshots
+	if price := exported["gpt-5.4"]; price.InputPerMillionUSD == nil || *price.InputPerMillionUSD != 77 {
+		t.Fatalf("explicit gpt-5.4 price was replaced: %#v", price)
+	}
+	if price := exported["gpt-5.5"]; price.InputPerMillionUSD == nil || *price.InputPerMillionUSD != manual {
+		t.Fatalf("manual gpt-5.5 price was replaced: %#v", price)
+	}
+}
+
+func TestCCHPriceSyncBaseAliasRepricesHistoricalUsage(t *testing.T) {
+	store := NewQuotaAuditStore()
+	t0 := time.Date(2026, 8, 20, 4, 0, 0, 0, time.UTC)
+	store.RecordQuotaSnapshot("auth", "auth-index", "", t0, []byte(`{"rate_limit":{"primary_window":{"used_percent":0}}}`))
+	store.CaptureUsage(Record{Provider: "codex", Model: "gpt-5.4", AuthID: "auth", AuthIndex: "auth-index", RequestedAt: t0.Add(time.Minute), Detail: Detail{InputTokens: 1_000_000, OutputTokens: 1_000_000, TotalTokens: 2_000_000}})
+	if usage := store.Export().Usage[0]; usage.CostUSD != nil {
+		t.Fatalf("usage was priced before sync: %#v", usage)
+	}
+	if _, err := newCCHTestSync(t, store, `{"version":"1","models":[{"id":"gpt-5.4-2026-02-03","input":3,"output":4}]}`, http.StatusOK).Sync(context.Background()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	t1 := t0.Add(2 * time.Minute)
+	store.RecordQuotaSnapshot("auth", "auth-index", "", t1, []byte(`{"rate_limit":{"primary_window":{"used_percent":1}}}`))
+	rows := store.Build(QuotaAuditQuery{}, t1.Add(time.Minute)).Rows
+	for _, row := range rows {
+		if row.Model == "gpt-5.4" && row.CostDeltaUSD != nil {
+			if *row.CostDeltaUSD != 7 || row.CostStatus != "priced" {
+				t.Fatalf("historical alias cost = %#v", row)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing repriced historical usage rows: %#v", rows)
+}
+
 func TestCCHPriceSyncTimeoutAndNon2xxKeepOldPrice(t *testing.T) {
 	store := NewQuotaAuditStore()
 	old := 9.0

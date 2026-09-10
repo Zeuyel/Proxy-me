@@ -86,7 +86,7 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		ctx = context.Background()
 	}
 
-	flow, err := a.StartDeviceFlow(ctx, cfg)
+	flow, err := a.StartDeviceFlowWithHeaders(ctx, cfg, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -103,11 +103,15 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		}
 	}
 
-	return a.CompleteDeviceFlow(ctx, cfg, flow)
+	return a.CompleteDeviceFlowWithHeaders(ctx, cfg, flow, nil)
 }
 
 // StartDeviceFlow requests a Codex one-time user code without blocking for completion.
 func (a *CodexAuthenticator) StartDeviceFlow(ctx context.Context, cfg *config.Config) (*CodexDeviceFlow, error) {
+	return a.StartDeviceFlowWithHeaders(ctx, cfg, nil)
+}
+
+func (a *CodexAuthenticator) StartDeviceFlowWithHeaders(ctx context.Context, cfg *config.Config, headers map[string]string) (*CodexDeviceFlow, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("cliproxy auth: configuration is required")
 	}
@@ -116,7 +120,7 @@ func (a *CodexAuthenticator) StartDeviceFlow(ctx context.Context, cfg *config.Co
 	}
 
 	httpClient := newCodexDeviceHTTPClient(cfg)
-	userCodeResp, err := requestCodexDeviceUserCode(ctx, httpClient)
+	userCodeResp, err := requestCodexDeviceUserCode(ctx, httpClient, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -140,6 +144,10 @@ func (a *CodexAuthenticator) StartDeviceFlow(ctx context.Context, cfg *config.Co
 
 // CompleteDeviceFlow polls until the user authorizes the one-time code and returns an auth record.
 func (a *CodexAuthenticator) CompleteDeviceFlow(ctx context.Context, cfg *config.Config, flow *CodexDeviceFlow) (*coreauth.Auth, error) {
+	return a.CompleteDeviceFlowWithHeaders(ctx, cfg, flow, nil)
+}
+
+func (a *CodexAuthenticator) CompleteDeviceFlowWithHeaders(ctx context.Context, cfg *config.Config, flow *CodexDeviceFlow, headers map[string]string) (*coreauth.Auth, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("cliproxy auth: configuration is required")
 	}
@@ -162,7 +170,7 @@ func (a *CodexAuthenticator) CompleteDeviceFlow(ctx context.Context, cfg *config
 		pollInterval = time.Duration(codexDeviceDefaultPollIntervalSeconds) * time.Second
 	}
 
-	tokenResp, err := pollCodexDeviceToken(ctx, httpClient, deviceAuthID, deviceCode, pollInterval)
+	tokenResp, err := pollCodexDeviceToken(ctx, httpClient, deviceAuthID, deviceCode, pollInterval, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +199,7 @@ func (a *CodexAuthenticator) CompleteDeviceFlow(ctx context.Context, cfg *config
 	return a.buildAuthRecord(authSvc, authBundle)
 }
 
-func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*codexDeviceUserCodeResponse, error) {
+func requestCodexDeviceUserCode(ctx context.Context, client *http.Client, headers map[string]string) (*codexDeviceUserCodeResponse, error) {
 	body, err := json.Marshal(codexDeviceUserCodeRequest{ClientID: codex.ClientID})
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode codex device request: %w", err)
@@ -203,7 +211,7 @@ func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*code
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	setCodexDeviceRequestHeaders(req)
+	setCodexDeviceRequestHeaders(req, headers)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -235,7 +243,11 @@ func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*code
 	return &parsed, nil
 }
 
-func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID, userCode string, interval time.Duration) (*codexDeviceTokenResponse, error) {
+func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID, userCode string, interval time.Duration, profileHeaders ...map[string]string) (*codexDeviceTokenResponse, error) {
+	var headers map[string]string
+	if len(profileHeaders) > 0 {
+		headers = profileHeaders[0]
+	}
 	deadline := time.Now().Add(codexDeviceTimeout)
 
 	for {
@@ -257,7 +269,7 @@ func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
-		setCodexDeviceRequestHeaders(req)
+		setCodexDeviceRequestHeaders(req, headers)
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -295,9 +307,31 @@ func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID
 	}
 }
 
-func setCodexDeviceRequestHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", codexDeviceUserAgent)
-	req.Header.Set("Originator", codexDeviceOriginator)
+func setCodexDeviceRequestHeaders(req *http.Request, headers map[string]string) {
+	if req == nil {
+		return
+	}
+	userAgent := codexDeviceProfileHeader(headers, "user_agent")
+	if userAgent == "" {
+		userAgent = codexDeviceUserAgent
+	}
+	originator := codexDeviceProfileHeader(headers, "originator")
+	if originator == "" {
+		originator = codexDeviceOriginator
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Originator", originator)
+}
+
+func codexDeviceProfileHeader(headers map[string]string, key string) string {
+	key = strings.NewReplacer("-", "_", " ", "_").Replace(strings.ToLower(strings.TrimSpace(key)))
+	for name, value := range headers {
+		name = strings.NewReplacer("-", "_", " ", "_").Replace(strings.ToLower(strings.TrimSpace(name)))
+		if name == key {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func codexDeviceShouldKeepPolling(statusCode int, body []byte) bool {

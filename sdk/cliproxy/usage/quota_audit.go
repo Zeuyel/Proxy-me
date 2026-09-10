@@ -106,30 +106,31 @@ type QuotaAuditTokens struct {
 }
 
 type QuotaAuditRow struct {
-	SnapshotID          string           `json:"snapshot_id"`
-	Auth                string           `json:"auth"`
-	AuthID              string           `json:"auth_id,omitempty"`
-	AuthIndex           string           `json:"auth_index,omitempty"`
-	Account             string           `json:"account,omitempty"`
-	Window              string           `json:"window"`
-	PlanType            string           `json:"plan_type,omitempty"`
-	Model               string           `json:"model,omitempty"`
-	SessionIDs          []string         `json:"session_ids"`
-	ThreadIDs           []string         `json:"thread_ids"`
-	Timestamp           time.Time        `json:"timestamp"`
-	UsedPercent         *float64         `json:"used_percent"`
-	RemainingPercent    *float64         `json:"remaining_percent,omitempty"`
-	QuotaDeltaPercent   *float64         `json:"quota_delta_percent"`
-	Tokens              QuotaAuditTokens `json:"tokens"`
-	CostDeltaUSD        *float64         `json:"cost_delta_usd"`
-	CostPerQuotaPercent *float64         `json:"cost_per_quota_percent"`
-	CostStatus          string           `json:"cost_status"`
-	Status              string           `json:"status"`
-	Reset               bool             `json:"reset"`
-	ResetAt             *time.Time       `json:"reset_at"`
-	Stale               bool             `json:"stale"`
-	Reason              string           `json:"reason,omitempty"`
-	PriceSnapshot       *PriceSnapshot   `json:"price_snapshot,omitempty"`
+	SnapshotID            string           `json:"snapshot_id"`
+	Auth                  string           `json:"auth"`
+	AuthID                string           `json:"auth_id,omitempty"`
+	AuthIndex             string           `json:"auth_index,omitempty"`
+	Account               string           `json:"account,omitempty"`
+	Window                string           `json:"window"`
+	WindowDurationSeconds *float64         `json:"window_duration_seconds,omitempty"`
+	PlanType              string           `json:"plan_type,omitempty"`
+	Model                 string           `json:"model,omitempty"`
+	SessionIDs            []string         `json:"session_ids"`
+	ThreadIDs             []string         `json:"thread_ids"`
+	Timestamp             time.Time        `json:"timestamp"`
+	UsedPercent           *float64         `json:"used_percent"`
+	RemainingPercent      *float64         `json:"remaining_percent,omitempty"`
+	QuotaDeltaPercent     *float64         `json:"quota_delta_percent"`
+	Tokens                QuotaAuditTokens `json:"tokens"`
+	CostDeltaUSD          *float64         `json:"cost_delta_usd"`
+	CostPerQuotaPercent   *float64         `json:"cost_per_quota_percent"`
+	CostStatus            string           `json:"cost_status"`
+	Status                string           `json:"status"`
+	Reset                 bool             `json:"reset"`
+	ResetAt               *time.Time       `json:"reset_at"`
+	Stale                 bool             `json:"stale"`
+	Reason                string           `json:"reason,omitempty"`
+	PriceSnapshot         *PriceSnapshot   `json:"price_snapshot,omitempty"`
 }
 
 type QuotaAuditSummary struct {
@@ -612,7 +613,11 @@ func (s *QuotaAuditStore) priceSnapshot(model string) (PriceSnapshot, bool, bool
 }
 
 func normalizeQuotaAuditModel(model string) string {
-	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(model)), " "))
+	normalized := strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(model)), " "))
+	if normalized == "codex-auto-review" {
+		return "gpt-5.6-luna-low-openai-compact"
+	}
+	return normalized
 }
 
 func (s *QuotaAuditStore) CaptureUsage(record Record) {
@@ -1092,7 +1097,7 @@ func snapshotInQuery(snapshot QuotaWindowSnapshot, query QuotaAuditQuery, accoun
 func buildQuotaAuditRow(snapshot QuotaWindowSnapshot, previous *QuotaWindowSnapshot, identity string, usage []QuotaAuditUsage, modelFilter string, prices map[string]PriceSnapshot, now time.Time, assigned map[string]struct{}) QuotaAuditRow {
 	row := QuotaAuditRow{
 		SnapshotID: snapshot.SnapshotID, Auth: identity, AuthID: snapshot.AuthID, AuthIndex: snapshot.AuthIndex, Account: snapshot.Account, Window: snapshot.Window,
-		PlanType: snapshot.PlanType, Timestamp: snapshot.ObservedAt, UsedPercent: snapshot.UsedPercent,
+		WindowDurationSeconds: snapshot.WindowDurationSeconds, PlanType: snapshot.PlanType, Timestamp: snapshot.ObservedAt, UsedPercent: snapshot.UsedPercent,
 		RemainingPercent: snapshot.RemainingPercent, SessionIDs: []string{}, ThreadIDs: []string{}, Tokens: QuotaAuditTokens{}, Status: "ok", CostStatus: "unpriced", Stale: quotaSnapshotStale(snapshot, now),
 	}
 	if !snapshot.ResetAt.IsZero() {
