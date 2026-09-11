@@ -161,7 +161,7 @@ func normalizeCodexReasoningItemIDs(rawJSON []byte) []byte {
 		}
 		id := item.Get("id").String()
 		if strings.HasPrefix(id, "item_") {
-			result, _ = sjson.SetBytes(result, fmt.Sprintf("input.%d.id", i), "rs"+strings.TrimPrefix(id, "item_"))
+			result, _ = sjson.SetBytes(result, fmt.Sprintf("input.%d.id", i), "rs_"+strings.TrimPrefix(id, "item_"))
 		}
 	}
 	return result
