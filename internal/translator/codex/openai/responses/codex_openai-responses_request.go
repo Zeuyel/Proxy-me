@@ -155,14 +155,21 @@ func normalizeCodexReasoningItemIDs(rawJSON []byte) []byte {
 		return rawJSON
 	}
 	result := rawJSON
-	for i, item := range input.Array() {
-		if item.Get("type").String() != "reasoning" {
+	// `item_` IDs from a gateway are not aliases for persisted Codex `rs_`
+	// items. Rewriting the prefix would produce an ID that passes validation but
+	// cannot be found because Codex requests use store=false. Drop those stale
+	// reasoning items instead of forwarding a fabricated ID.
+	newInput := "[]"
+	changed := false
+	for _, item := range input.Array() {
+		if item.Get("type").String() == "reasoning" && strings.HasPrefix(item.Get("id").String(), "item_") {
+			changed = true
 			continue
 		}
-		id := item.Get("id").String()
-		if strings.HasPrefix(id, "item_") {
-			result, _ = sjson.SetBytes(result, fmt.Sprintf("input.%d.id", i), "rs_"+strings.TrimPrefix(id, "item_"))
-		}
+		newInput, _ = sjson.SetRaw(newInput, "-1", item.Raw)
+	}
+	if changed {
+		result, _ = sjson.SetRawBytes(result, "input", []byte(newInput))
 	}
 	return result
 }

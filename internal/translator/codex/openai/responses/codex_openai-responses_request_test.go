@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -267,11 +268,13 @@ func TestConvertSystemRoleToDeveloper_AssistantRole(t *testing.T) {
 func TestNormalizeCodexReasoningItemIDs(t *testing.T) {
 	input := []byte(`{"model":"gpt-5.2","input":[{"type":"reasoning","id":"item_cf43ae3b1df63075c7597a9f","summary":[]},{"type":"message","id":"item_keep","role":"user","content":"Hi"}]}`)
 	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", input, false)
-	if got := gjson.GetBytes(output, "input.0.id").String(); got != "rs_cf43ae3b1df63075c7597a9f" {
-		t.Fatalf("expected reasoning id to be normalized, got %q", got)
+	for _, item := range gjson.GetBytes(output, "input").Array() {
+		if item.Get("type").String() == "reasoning" {
+			t.Fatal("stale gateway reasoning item should be removed")
+		}
 	}
-	if got := gjson.GetBytes(output, "input.1.id").String(); got != "item_keep" {
-		t.Fatalf("non-reasoning id was changed: %q", got)
+	if !strings.Contains(string(output), `"id":"item_keep"`) {
+		t.Fatal("non-reasoning item was changed or removed")
 	}
 }
 
