@@ -180,3 +180,75 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexBackendAliases(t *testing.T) {
+	server := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/backend-api/codex/models?client_version=0.149.0", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /backend-api/codex/models returned %d: %s", rr.Code, rr.Body.String())
+	}
+	var codexPayload struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &codexPayload); err != nil {
+		t.Fatalf("decode Codex model response: %v", err)
+	}
+	if codexPayload.Models == nil {
+		t.Fatalf("Codex model response missing models array: %s", rr.Body.String())
+	}
+
+	for _, path := range []string{"/v1/models"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer test-key")
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET %s returned %d: %s", path, rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), `"object":"list"`) {
+			t.Fatalf("GET %s response missing model list: %s", path, rr.Body.String())
+		}
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6-astra","input":"ping"}`))
+	req2.Header.Set("Authorization", "Bearer test-key")
+	rr2 := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr2, req2)
+	if rr2.Code == http.StatusNotFound {
+		t.Fatalf("POST /backend-api/codex/responses was not registered")
+	}
+	analyticsReq := httptest.NewRequest(http.MethodPost, "/backend-api/codex/analytics-events/events", strings.NewReader(`{"events":[]}`))
+	analyticsReq.Header.Set("Authorization", "Bearer test-key")
+	analyticsRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(analyticsRR, analyticsReq)
+	if analyticsRR.Code == http.StatusNotFound {
+		t.Fatalf("POST /backend-api/codex/analytics-events/events was not registered")
+	}
+	pluginReq := httptest.NewRequest(http.MethodGet, "/backend-api/ps/plugins/list?scope=GLOBAL", nil)
+	pluginReq.Header.Set("Authorization", "Bearer test-key")
+	pluginRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(pluginRR, pluginReq)
+	if pluginRR.Code == http.StatusNotFound {
+		t.Fatalf("GET /backend-api/ps/plugins/list was not registered")
+	}
+
+	usageReq := httptest.NewRequest(http.MethodGet, "/backend-api/wham/usage", nil)
+	usageReq.Header.Set("Authorization", "Bearer test-key")
+	usageRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(usageRR, usageReq)
+	if usageRR.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /backend-api/wham/usage returned %d, want %d", usageRR.Code, http.StatusServiceUnavailable)
+	}
+	taskReq := httptest.NewRequest(http.MethodPost, "/backend-api/wham/tasks", strings.NewReader(`{"title":"test"}`))
+	taskReq.Header.Set("Authorization", "Bearer test-key")
+	taskRR := httptest.NewRecorder()
+	server.engine.ServeHTTP(taskRR, taskReq)
+	if taskRR.Code == http.StatusNotFound {
+		t.Fatalf("POST /backend-api/wham/tasks was not registered")
+	}
+}

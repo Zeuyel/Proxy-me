@@ -10,7 +10,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -19,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -87,6 +91,280 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 		"object": "list",
 		"data":   filteredModels,
 	})
+}
+
+// CodexModels handles the Codex backend model-catalog protocol.
+func (h *OpenAIAPIHandler) CodexModels(c *gin.Context) {
+	if h != nil && h.AuthManager != nil {
+		if auth := h.codexAuthForRequest(c); auth != nil {
+			targetURL := codexBaseURL(auth) + "/models"
+			targetURL = withCodexClientVersion(targetURL, c.Request.URL.RawQuery)
+			h.proxyCodexGET(c, auth, targetURL)
+			return
+		}
+	}
+
+	allModels := h.AvailableModelsForRequest(c, "openai")
+	models := make([]map[string]any, 0, len(allModels))
+	for index, model := range allModels {
+		id, _ := model["id"].(string)
+		if id == "" {
+			continue
+		}
+		displayName, _ := model["display_name"].(string)
+		if displayName == "" {
+			displayName = id
+		}
+		description, _ := model["description"].(string)
+		contextWindow := int64ModelField(model, "context_length")
+		entry := map[string]any{
+			"slug":                    id,
+			"display_name":            displayName,
+			"description":             description,
+			"default_reasoning_level": "medium",
+			"supported_reasoning_levels": []map[string]string{
+				{"effort": "low", "description": "Low"},
+				{"effort": "medium", "description": "Medium"},
+				{"effort": "high", "description": "High"},
+			},
+			"shell_type":                   "unified_exec",
+			"visibility":                   "list",
+			"supported_in_api":             true,
+			"priority":                     index,
+			"availability_nux":             nil,
+			"upgrade":                      nil,
+			"support_verbosity":            false,
+			"default_verbosity":            nil,
+			"apply_patch_tool_type":        nil,
+			"truncation_policy":            map[string]any{"mode": "tokens", "limit": contextWindow},
+			"context_window":               nil,
+			"experimental_supported_tools": []string{},
+		}
+		if contextWindow > 0 {
+			entry["context_window"] = contextWindow
+		}
+		models = append(models, entry)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"models": models})
+}
+
+func withCodexClientVersion(targetURL, rawQuery string) string {
+	parsed, err := url.Parse(targetURL)
+	if err != nil {
+		return targetURL
+	}
+	query := parsed.Query()
+	for key, values := range parseRawQuery(rawQuery) {
+		query[key] = values
+	}
+	if query.Get("client_version") == "" {
+		query.Set("client_version", "0.153.4")
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func parseRawQuery(rawQuery string) url.Values {
+	if rawQuery == "" {
+		return nil
+	}
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return nil
+	}
+	return values
+}
+
+func int64ModelField(model map[string]any, key string) int64 {
+	switch value := model[key].(type) {
+	case int:
+		return int64(value)
+	case int64:
+		return value
+	case float64:
+		return int64(value)
+	case json.Number:
+		parsed, _ := value.Int64()
+		return parsed
+	default:
+		return 0
+	}
+}
+
+// CodexWHAM proxies account metadata requests made by the Codex client.
+func (h *OpenAIAPIHandler) CodexWHAM(c *gin.Context) {
+	if h == nil || h.AuthManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no Codex account is configured"})
+		return
+	}
+	auth := h.codexAuthForRequest(c)
+	if auth == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no Codex account is available"})
+		return
+	}
+
+	endpoint := strings.TrimPrefix(c.Request.URL.Path, "/backend-api/wham/")
+	if endpoint == "" || strings.Contains(endpoint, "..") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid Codex metadata endpoint"})
+		return
+	}
+	targetURL := codexBackendRoot(auth) + "/wham/" + endpoint
+	if c.Request.URL.RawQuery != "" {
+		targetURL += "?" + c.Request.URL.RawQuery
+	}
+	h.proxyCodexRequest(c, auth, targetURL)
+}
+
+// CodexPS proxies plugin-service requests made by the Codex client.
+func (h *OpenAIAPIHandler) CodexPS(c *gin.Context) {
+	if h == nil || h.AuthManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no Codex account is configured"})
+		return
+	}
+	auth := h.codexAuthForRequest(c)
+	if auth == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no Codex account is available"})
+		return
+	}
+	endpoint := strings.TrimPrefix(c.Param("endpoint"), "/")
+	if endpoint == "" {
+		endpoint = strings.TrimPrefix(c.Request.URL.Path, "/backend-api/ps/")
+	}
+	if endpoint == "" || strings.Contains(endpoint, "..") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid Codex plugin endpoint"})
+		return
+	}
+	targetURL := codexBackendRoot(auth) + "/ps/" + endpoint
+	if c.Request.URL.RawQuery != "" {
+		targetURL += "?" + c.Request.URL.RawQuery
+	}
+	h.proxyCodexRequest(c, auth, targetURL)
+}
+
+// CodexBackend proxies feature-specific Codex backend requests.
+func (h *OpenAIAPIHandler) CodexBackend(c *gin.Context) {
+	if h == nil || h.AuthManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no Codex account is configured"})
+		return
+	}
+	auth := h.codexAuthForRequest(c)
+	if auth == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no Codex account is available"})
+		return
+	}
+	endpoint := strings.TrimPrefix(c.Param("endpoint"), "/")
+	if endpoint == "" {
+		endpoint = strings.TrimPrefix(c.Request.URL.Path, "/backend-api/codex/")
+	}
+	if endpoint == "" || strings.Contains(endpoint, "..") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid Codex backend endpoint"})
+		return
+	}
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	targetURL := codexBaseURL(auth) + "/" + endpoint
+	if c.Request.URL.RawQuery != "" {
+		targetURL += "?" + c.Request.URL.RawQuery
+	}
+	req, err := h.AuthManager.NewHttpRequest(c.Request.Context(), auth, c.Request.Method, targetURL, body, c.Request.Header)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	resp, err := h.AuthManager.HttpRequest(c.Request.Context(), auth, req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	for key, values := range resp.Header {
+		for _, value := range values {
+			c.Header(key, value)
+		}
+	}
+	c.Status(resp.StatusCode)
+	_, _ = io.Copy(c.Writer, resp.Body)
+}
+
+func codexBaseURL(auth *coreauth.Auth) string {
+	baseURL := "https://chatgpt.com/backend-api/codex"
+	if auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["base_url"]) != "" {
+		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	return strings.TrimRight(baseURL, "/")
+}
+
+func codexBackendRoot(auth *coreauth.Auth) string {
+	baseURL := "https://chatgpt.com/backend-api/codex"
+	if auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["base_url"]) != "" {
+		baseURL = strings.TrimRight(strings.TrimSpace(auth.Attributes["base_url"]), "/")
+	}
+	return codexBackendRootFromURL(baseURL)
+}
+
+func codexBackendRootFromURL(baseURL string) string {
+	return strings.TrimSuffix(strings.TrimRight(baseURL, "/"), "/codex")
+}
+
+func (h *OpenAIAPIHandler) proxyCodexGET(c *gin.Context, auth *coreauth.Auth, targetURL string) {
+	h.proxyCodexRequestWithBody(c, auth, http.MethodGet, targetURL, nil)
+}
+
+func (h *OpenAIAPIHandler) proxyCodexRequest(c *gin.Context, auth *coreauth.Auth, targetURL string) {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	h.proxyCodexRequestWithBody(c, auth, c.Request.Method, targetURL, body)
+}
+
+func (h *OpenAIAPIHandler) proxyCodexRequestWithBody(c *gin.Context, auth *coreauth.Auth, method, targetURL string, body []byte) {
+	req, err := h.AuthManager.NewHttpRequest(c.Request.Context(), auth, method, targetURL, body, c.Request.Header)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	resp, err := h.AuthManager.HttpRequest(c.Request.Context(), auth, req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	for key, values := range resp.Header {
+		for _, value := range values {
+			c.Header(key, value)
+		}
+	}
+	c.Status(resp.StatusCode)
+	_, _ = io.Copy(c.Writer, resp.Body)
+}
+
+func (h *OpenAIAPIHandler) codexAuthForRequest(c *gin.Context) *coreauth.Auth {
+	clientKey := ""
+	if value, ok := c.Get("apiKey"); ok {
+		clientKey = strings.TrimSpace(fmt.Sprint(value))
+	}
+	allowed, restricted := h.AuthManager.AllowedAuthIDsForClientKey(clientKey)
+	for _, auth := range h.AuthManager.List() {
+		if auth == nil || !strings.EqualFold(auth.Provider, "codex") || auth.Disabled {
+			continue
+		}
+		if auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != "" {
+			continue
+		}
+		if restricted {
+			if _, ok := allowed[auth.ID]; !ok {
+				continue
+			}
+		}
+		return auth
+	}
+	return nil
 }
 
 // ChatCompletions handles the /v1/chat/completions endpoint.

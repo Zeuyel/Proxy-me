@@ -1,0 +1,34 @@
+{
+  "providers": {
+    "proxy-me": {
+      "baseUrl": "http://127.0.0.1:8317/v1",
+      "api": "openai-responses",
+      "apiKey": "${PROXY_ME_API_KEY}",
+      "authHeader": true,
+      "models": [
+        {
+          "id": "gpt-6-astra",
+          "name": "GPT-6 Astra",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 272000,
+          "maxTokens": 128000,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "compat": {
+            "supportsOpenAIGrammarTools": true,
+            "supportsAdditionalTools": true,
+            "supportsToolSearch": true
+          }
+        }
+      ]
+    }
+  }
+}

@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
@@ -42,6 +44,44 @@ const (
 	// cooldown for effectively drained auth files.
 	codexQuotaUsedPercentExhaustedThreshold = 99.5
 )
+
+const (
+	codexModelsRefreshInterval   = 4*time.Minute + 30*time.Second
+	codexUsageRefreshInterval    = time.Minute
+	codexAccountRefreshInterval  = 15 * time.Minute
+	codexAuxiliaryPollInterval   = 15 * time.Second
+	codexAuxiliaryRequestTimeout = 10 * time.Second
+)
+
+type codexAuxiliaryEndpoint struct {
+	path     string
+	interval time.Duration
+}
+
+var codexAuxiliaryEndpoints = []codexAuxiliaryEndpoint{
+	{path: "models", interval: codexModelsRefreshInterval},
+	{path: "wham/usage", interval: codexUsageRefreshInterval},
+	{path: "wham/profiles/me", interval: codexAccountRefreshInterval},
+	{path: "wham/config/bundle", interval: codexAccountRefreshInterval},
+	{path: "wham/settings/user", interval: codexAccountRefreshInterval},
+}
+
+var codexAuxiliaryRefreshState = struct {
+	sync.Mutex
+	last map[string]time.Time
+}{last: make(map[string]time.Time)}
+
+var codexAuxiliaryPollerState = struct {
+	sync.Mutex
+	started map[string]struct{}
+}{started: make(map[string]struct{})}
+
+var codexAuxiliaryUsageIntervalState = struct {
+	sync.Mutex
+	values map[string]time.Duration
+}{values: make(map[string]time.Duration)}
+
+type codexAuxiliaryRequestContextKey struct{}
 
 var dataTag = []byte("data:")
 
@@ -127,6 +167,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
+	e.triggerCodexAuxiliaryRequests(auth, baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -409,6 +450,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
+	e.triggerCodexAuxiliaryRequests(auth, baseURL)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -1518,6 +1560,11 @@ func resetCodexClientHeaders(req *http.Request) {
 				continue
 			}
 			delete(headers, key)
+		case "cache-control":
+			if req.Context().Value(codexAuxiliaryRequestContextKey{}) == true {
+				continue
+			}
+			delete(headers, key)
 		default:
 			delete(headers, key)
 		}
@@ -1812,6 +1859,181 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
+}
+
+func (e *CodexExecutor) triggerCodexAuxiliaryRequests(auth *cliproxyauth.Auth, baseURL string) {
+	if e == nil || auth == nil || codexUsesAPIKey(auth) || !codexOAuthAccount(auth, baseURL) {
+		return
+	}
+
+	rootURL := codexAuxiliaryRootURL(baseURL)
+	if rootURL == "" {
+		return
+	}
+	e.ensureCodexAuxiliaryPoller(auth, baseURL, rootURL)
+	e.scheduleCodexAuxiliaryRequests(auth, baseURL, rootURL)
+}
+
+func (e *CodexExecutor) ensureCodexAuxiliaryPoller(auth *cliproxyauth.Auth, baseURL, rootURL string) {
+	stateKey := auth.ID + "\x00" + rootURL
+	codexAuxiliaryPollerState.Lock()
+	if _, started := codexAuxiliaryPollerState.started[stateKey]; started {
+		codexAuxiliaryPollerState.Unlock()
+		return
+	}
+	codexAuxiliaryPollerState.started[stateKey] = struct{}{}
+	codexAuxiliaryPollerState.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(codexAuxiliaryPollInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			e.scheduleCodexAuxiliaryRequests(auth, baseURL, rootURL)
+		}
+	}()
+}
+
+func (e *CodexExecutor) scheduleCodexAuxiliaryRequests(auth *cliproxyauth.Auth, baseURL, rootURL string) {
+	if e == nil || auth == nil {
+		return
+	}
+	codexURL := codexAuxiliaryCodexURL(baseURL)
+	now := time.Now()
+	for _, endpoint := range codexAuxiliaryEndpoints {
+		stateKey := auth.ID + "\x00" + rootURL + "\x00" + endpoint.path
+		interval := endpoint.interval
+		if endpoint.path == "wham/usage" {
+			interval = codexAuxiliaryUsageInterval(stateKey)
+		}
+		codexAuxiliaryRefreshState.Lock()
+		last := codexAuxiliaryRefreshState.last[stateKey]
+		if !last.IsZero() && now.Sub(last) < interval {
+			codexAuxiliaryRefreshState.Unlock()
+			continue
+		}
+		codexAuxiliaryRefreshState.last[stateKey] = now
+		codexAuxiliaryRefreshState.Unlock()
+
+		target := rootURL + "/" + endpoint.path
+		if endpoint.path == "models" {
+			target = withCodexClientVersionParam(codexURL + "/models")
+		}
+		go e.executeCodexAuxiliaryRequest(target, auth, stateKey)
+	}
+}
+
+func codexAuxiliaryUsageInterval(stateKey string) time.Duration {
+	codexAuxiliaryUsageIntervalState.Lock()
+	defer codexAuxiliaryUsageIntervalState.Unlock()
+	if interval := codexAuxiliaryUsageIntervalState.values[stateKey]; interval > 0 {
+		return interval
+	}
+	return codexUsageRefreshInterval
+}
+
+func withCodexClientVersionParam(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	q := u.Query()
+	if q.Get("client_version") == "" {
+		q.Set("client_version", codexClientVersion)
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
+}
+
+func codexOAuthAccount(auth *cliproxyauth.Auth, baseURL string) bool {
+	if auth == nil {
+		return false
+	}
+	if kind := strings.ToLower(strings.TrimSpace(auth.Attributes["auth_kind"])); kind != "" {
+		return kind == "oauth"
+	}
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	return err == nil && strings.EqualFold(u.Hostname(), "chatgpt.com")
+}
+
+func codexAuxiliaryRootURL(baseURL string) string {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		baseURL = "https://chatgpt.com/backend-api/codex"
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.Path = strings.TrimSuffix(strings.TrimSuffix(u.Path, "/"), "/codex")
+	u.RawPath = ""
+	return strings.TrimSuffix(u.String(), "/")
+}
+
+func codexAuxiliaryCodexURL(baseURL string) string {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		baseURL = "https://chatgpt.com/backend-api/codex"
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.RawPath = ""
+	return strings.TrimSuffix(u.String(), "/")
+}
+
+func (e *CodexExecutor) executeCodexAuxiliaryRequest(target string, auth *cliproxyauth.Auth, usageStateKey string) {
+	ctx, cancel := context.WithTimeout(context.Background(), codexAuxiliaryRequestTimeout)
+	defer cancel()
+	ctx = context.WithValue(ctx, codexAuxiliaryRequestContextKey{}, true)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return
+	}
+	if strings.HasSuffix(req.URL.Path, "/wham/settings/user") {
+		req.Header.Set("Cache-Control", "no-cache, no-store")
+	}
+	resp, err := e.HttpRequest(ctx, auth, req)
+	if err != nil || resp == nil || resp.Body == nil {
+		return
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if usageStateKey != "" && strings.HasSuffix(req.URL.Path, "/wham/usage") && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		codexAuxiliaryUsageIntervalState.Lock()
+		codexAuxiliaryUsageIntervalState.values[usageStateKey] = codexUsageRefreshIntervalForPayload(body)
+		codexAuxiliaryUsageIntervalState.Unlock()
+	}
+}
+
+func codexUsageRefreshIntervalForPayload(payload []byte) time.Duration {
+	root := gjson.ParseBytes(payload)
+	maxUsed := 0.0
+	for _, key := range []string{"rate_limit", "rateLimit", "code_review_rate_limit", "codeReviewRateLimit"} {
+		rateLimit := root.Get(key)
+		for _, windowKey := range []string{"primary_window", "primaryWindow", "secondary_window", "secondaryWindow"} {
+			window := rateLimit.Get(windowKey)
+			for _, usedKey := range []string{"used_percent", "usedPercent"} {
+				if used, ok := gjsonToFloat(window.Get(usedKey)); ok && used > maxUsed {
+					maxUsed = used
+				}
+			}
+		}
+	}
+	switch {
+	case maxUsed >= 99:
+		return 5 * time.Second
+	case maxUsed >= 90:
+		return 15 * time.Second
+	case maxUsed >= 75:
+		return 30 * time.Second
+	default:
+		return codexUsageRefreshInterval
+	}
 }
 
 func codexUsesAPIKey(auth *cliproxyauth.Auth) bool {

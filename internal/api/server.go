@@ -341,6 +341,26 @@ func (s *Server) setupRoutes() {
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
 	}
 
+	// Codex clients derive backend routes from this base path.
+	codex := s.engine.Group("/backend-api/codex")
+	codex.Use(AuthMiddleware(s.accessManager))
+	{
+		codex.GET("/models", openaiHandlers.CodexModels)
+		codex.POST("/responses", openaiResponsesHandlers.Responses)
+		codex.POST("/responses/compact", openaiResponsesHandlers.Compact)
+		codex.POST("/analytics-events/events", openaiHandlers.CodexBackend)
+		codex.POST("/images/generations", openaiHandlers.CodexBackend)
+		codex.POST("/images/edits", openaiHandlers.CodexBackend)
+		codex.POST("/memories/trace_summarize", openaiHandlers.CodexBackend)
+		codex.POST("/realtime/calls", openaiHandlers.CodexBackend)
+	}
+	wham := s.engine.Group("/backend-api/wham")
+	wham.Use(AuthMiddleware(s.accessManager))
+	wham.Any("/*endpoint", openaiHandlers.CodexWHAM)
+	ps := s.engine.Group("/backend-api/ps")
+	ps.Use(AuthMiddleware(s.accessManager))
+	ps.Any("/*endpoint", openaiHandlers.CodexPS)
+
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))

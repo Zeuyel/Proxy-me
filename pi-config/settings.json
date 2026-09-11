@@ -1,0 +1,7 @@
+{
+  "defaultProvider": "proxy-me",
+  "defaultModel": "gpt-6-astra",
+  "defaultThinkingLevel": "medium",
+  "enableInstallTelemetry": false,
+  "tuiMode": "regular"
+}
