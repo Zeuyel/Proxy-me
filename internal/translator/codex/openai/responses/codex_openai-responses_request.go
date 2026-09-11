@@ -39,6 +39,10 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "service_tier")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "truncation")
 	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
+	// Some billing gateways expose Responses reasoning item IDs using the generic
+	// `item_` prefix. Codex requires reasoning item IDs to use the `rs` prefix
+	// when those items are replayed in a subsequent request.
+	rawJSON = normalizeCodexReasoningItemIDs(rawJSON)
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
 
 	originalInstructions := ""
@@ -145,6 +149,24 @@ func shouldDefaultCodexVerbosity(modelName string) bool {
 // Compatibility strategy:
 // 1) Remove context_management before forwarding to Codex upstream.
 // 2) Remove truncation as Codex upstream currently rejects it as unsupported.
+func normalizeCodexReasoningItemIDs(rawJSON []byte) []byte {
+	input := gjson.GetBytes(rawJSON, "input")
+	if !input.IsArray() {
+		return rawJSON
+	}
+	result := rawJSON
+	for i, item := range input.Array() {
+		if item.Get("type").String() != "reasoning" {
+			continue
+		}
+		id := item.Get("id").String()
+		if strings.HasPrefix(id, "item_") {
+			result, _ = sjson.SetBytes(result, fmt.Sprintf("input.%d.id", i), "rs"+strings.TrimPrefix(id, "item_"))
+		}
+	}
+	return result
+}
+
 func applyResponsesCompactionCompatibility(rawJSON []byte) []byte {
 	contextManagement := gjson.GetBytes(rawJSON, "context_management")
 	if !contextManagement.Exists() {
