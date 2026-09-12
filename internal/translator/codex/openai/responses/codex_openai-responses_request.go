@@ -166,7 +166,15 @@ func normalizeCodexReasoningItemIDs(rawJSON []byte) []byte {
 			changed = true
 			continue
 		}
-		newInput, _ = sjson.SetRaw(newInput, "-1", item.Raw)
+		itemRaw := item.Raw
+		if item.Get("type").String() == "reasoning" && item.Get("content").IsArray() && len(item.Get("content").Array()) > 0 {
+			// Codex reasoning items do not accept replayed content blocks; retain
+			// metadata/summary but remove the incompatible content array.
+			itemRawBytes, _ := sjson.DeleteBytes([]byte(itemRaw), "content")
+			itemRaw = string(itemRawBytes)
+			changed = true
+		}
+		newInput, _ = sjson.SetRaw(newInput, "-1", itemRaw)
 	}
 	if changed {
 		result, _ = sjson.SetRawBytes(result, "input", []byte(newInput))
