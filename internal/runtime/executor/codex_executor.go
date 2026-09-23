@@ -32,7 +32,7 @@ import (
 
 const (
 	codexClientVersion     = "0.153.4"
-	defaultCodexUserAgent  = "codex_cli_rs/0.153.4 (Linux; x86_64)"
+	defaultCodexUserAgent  = "codex-tui/0.153.4 (EndeavourOS Rolling Release; x86_64) ghostty/1.3.1-arch2 (codex-tui; 0.153.4)"
 	codexUsageURL          = "https://chatgpt.com/backend-api/wham/usage"
 	defaultCodexOriginator = "codex_cli_rs"
 	codexProductSKU        = "codex"
@@ -92,6 +92,35 @@ const codexCapacityMessage = "selected model is at capacity"
 
 func isCodexCapacityPayload(payload []byte) bool {
 	return strings.Contains(strings.ToLower(string(payload)), codexCapacityMessage)
+}
+
+func isInvalidCodexEncryptedContent(status int, payload []byte) bool {
+	return status == http.StatusBadRequest && strings.Contains(strings.ToLower(string(payload)), "invalid_encrypted_content")
+}
+
+func stripCodexReasoningItems(rawJSON []byte) []byte {
+	input := gjson.GetBytes(rawJSON, "input")
+	if !input.IsArray() {
+		return rawJSON
+	}
+
+	filtered := "[]"
+	changed := false
+	for _, item := range input.Array() {
+		if item.Get("type").String() == "reasoning" {
+			changed = true
+			continue
+		}
+		filtered, _ = sjson.SetRaw(filtered, "-1", item.Raw)
+	}
+	if !changed {
+		return rawJSON
+	}
+	result, err := sjson.SetRawBytes(rawJSON, "input", []byte(filtered))
+	if err != nil {
+		return rawJSON
+	}
+	return result
 }
 
 // CodexExecutor is a stateless executor for Codex (OpenAI Responses API entrypoint).
@@ -243,6 +272,32 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		b = applyCodexIdentityConfuseResponsePayload(b, identityState)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		if isInvalidCodexEncryptedContent(httpResp.StatusCode, b) {
+			logWithRequestID(ctx).Warn("codex executor: invalid encrypted reasoning content, retrying without replayed reasoning items")
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("codex executor: close response body error: %v", errClose)
+			}
+			body = stripCodexReasoningItems(body)
+			httpReq, upstreamBody, identityState, err = e.cacheHelper(ctx, from, url, auth, req, opts, originalPayload, body)
+			if err != nil {
+				return resp, err
+			}
+			applyCodexHeaders(httpReq, auth, apiKey, true)
+			applyCodexClientHeaderOverrides(httpReq.Header, opts.Headers, auth)
+			applyModelHeaderOverrides(httpReq.Header, baseModel)
+			applyCodexClientProfile(httpReq.Header, auth)
+			applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
+			applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
+			httpResp, err = httpClient.Do(httpReq)
+			if err != nil {
+				recordAPIResponseError(ctx, e.cfg, err)
+				return resp, err
+			}
+			recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+				goto executeResponseSuccess
+			}
+		}
 		if proxyRoute.Proxied && shouldBanReverseProxyOnError(httpResp.StatusCode, string(b)) {
 			banReverseProxyTemporarily(proxyRoute.ProxyID, e.Identifier(), httpResp.StatusCode, string(b))
 			if errClose := httpResp.Body.Close(); errClose != nil {
@@ -298,6 +353,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			return resp, err
 		}
 	}
+executeResponseSuccess:
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
@@ -533,6 +589,29 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		data = applyCodexIdentityConfuseResponsePayload(data, identityState)
 		appendAPIResponseChunk(ctx, e.cfg, data)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		if isInvalidCodexEncryptedContent(httpResp.StatusCode, data) {
+			logWithRequestID(ctx).Warn("codex executor: invalid encrypted reasoning content, retrying without replayed reasoning items")
+			body = stripCodexReasoningItems(body)
+			httpReq, upstreamBody, identityState, err = e.cacheHelper(ctx, from, url, auth, req, opts, originalPayload, body)
+			if err != nil {
+				return nil, err
+			}
+			applyCodexHeaders(httpReq, auth, apiKey, true)
+			applyCodexClientHeaderOverrides(httpReq.Header, opts.Headers, auth)
+			applyModelHeaderOverrides(httpReq.Header, baseModel)
+			applyCodexClientProfile(httpReq.Header, auth)
+			applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
+			applyReverseProxyHeaders(httpReq, e.cfg, auth, e.Identifier())
+			httpResp, err = httpClient.Do(httpReq)
+			if err != nil {
+				recordAPIResponseError(ctx, e.cfg, err)
+				return nil, err
+			}
+			recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+			if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+				goto executeStreamResponseSuccess
+			}
+		}
 		if proxyRoute.Proxied && shouldBanReverseProxyOnError(httpResp.StatusCode, string(data)) {
 			banReverseProxyTemporarily(proxyRoute.ProxyID, e.Identifier(), httpResp.StatusCode, string(data))
 			fallbackURL := originalURL
@@ -586,6 +665,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			return nil, err
 		}
 	}
+executeStreamResponseSuccess:
 	out := make(chan cliproxyexecutor.StreamChunk)
 	stream = out
 	go func() {
